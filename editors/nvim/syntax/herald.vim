@@ -21,7 +21,7 @@ syntax match heraldHeader /^[^\t#].*$/ contains=heraldBang
 " Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
 " show/marker rows so only true labels match. Styled like a header (Identifier), and a
 " trailing `!` ("show now") gets the same accent.
-syntax match heraldWorktree /\c^\t\+ *\%([#@:$[]\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/ contains=heraldBang
+syntax match heraldWorktree /\c^\t\+ *\%([#@:$[|]\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/ contains=heraldBang
 
 " Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane. Only the sigil is
 " highlighted (\zs starts the match after the indent); the text stays normal.
@@ -30,6 +30,10 @@ syntax match heraldPromptSigil /^\t\+ *\zs\c\%(prompt\)\?:\+\d*/
 " Command: `$`/`$$`/`$2` sigil, then the shell command text.
 syntax match heraldCommandSigil /^\t\+ *\zs\$\+\d*/ nextgroup=heraldCommandText
 syntax match heraldCommandText /.*/ contained
+
+" Multiline prompt body: a `|` line continues the prompt above it (YAML block-scalar style).
+" Only the `|` sigil is highlighted; the body text stays normal, like a prompt.
+syntax match heraldContSigil /^\t\+ *\zs|/
 
 " Show item: a bare `show` (any case) or a bare `!`.
 syntax match heraldShow /^\t\+ *\c\%(show\|!\)\s*$/
@@ -45,6 +49,7 @@ highlight default link heraldComment      Comment
 highlight default link heraldHeader       Identifier
 highlight default link heraldWorktree     Identifier
 highlight default link heraldPromptSigil  Statement
+highlight default link heraldContSigil    Statement
 highlight default link heraldCommandSigil Operator
 highlight default link heraldCommandText  String
 highlight default link heraldShow         Keyword

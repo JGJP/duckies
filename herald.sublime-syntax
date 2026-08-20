@@ -38,6 +38,14 @@ contexts:
         - match: $\n?
           pop: true
 
+    # Multiline prompt body: a `|` line continues the prompt above it (YAML block-scalar
+    # style). The `|` reads as a prompt sigil and the rest as prompt text, so a pasted body
+    # is never mistaken for a worktree label.
+    - match: '^\t+[ ]*(\|)(.*)$'
+      captures:
+        1: keyword.control.prompt.herald
+        2: meta.prompt.herald
+
     # Command: `$` sigil runs in the shell window; `$$`/`$2` target lane 2, etc. Sigil
     # and text share a contiguous region so a background color has no gaps.
     - match: '^\t+[ ]*(\$+\d*)(.*)$'

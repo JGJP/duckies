@@ -100,6 +100,14 @@ function colorsFor(line: string): (string | null)[] {
 		for (let i = a; i < Math.min(b, n); i++) col[i] = c
 	}
 	if (n === 0) return col
+	const lead = line.match(/^\t+[ ]*/)?.[0].length ?? 0
+	// A `|` line is a multiline prompt-body continuation (YAML block-scalar style): the `|`
+	// reads as a sigil, the rest as prompt text — so a pasted body never looks like a worktree.
+	if (line.startsWith('\t') && line[lead] === '|') {
+		fill(lead, lead + 1, C.promptSigil)
+		fill(lead + 1, n, C.promptText)
+		return col
+	}
 	const afterIndent = line.replace(/^[ \t]*/, '')
 	if (afterIndent.startsWith('#')) {
 		fill(0, n, C.comment)
@@ -112,7 +120,6 @@ function colorsFor(line: string): (string | null)[] {
 		if (m) fill(m.index!, m.index! + 1, C.bang)
 		return col
 	}
-	const lead = line.match(/^\t+[ ]*/)![0].length
 	const body = line.slice(lead)
 	const low = body.toLowerCase()
 	let m: RegExpMatchArray | null

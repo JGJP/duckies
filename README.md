@@ -144,17 +144,20 @@ moonbase-2
   event). `[NEEDS ATTENTION]` replaces the marker when Claude blocks waiting for
   input mid-task; answering it (submitting a prompt into the pane) flips it back to
   `[EXECUTING]`.
-- **Multiline prompt.** Lines indented **deeper** than a `prompt:`/`:` line are that
-  prompt's **body** — paste an error, a log, a spec under it and the whole block is sent
-  as one multiline prompt (via bracketed paste, so the newlines don't submit early). The
-  item stays a single queue entry and its status marker lands **below** the body:
+- **Multiline prompt.** Lines starting with `|` under a `prompt:`/`:` line are that
+  prompt's **body** (YAML block-scalar style) — paste an error, a log, a spec and prefix
+  each line with `|`; the whole block is sent as one multiline prompt (via bracketed paste,
+  so the newlines don't submit early). The `|` and one following space are stripped, but any
+  further indentation is kept, so the body's own shape survives. The explicit prefix keeps a
+  body line from being mistaken for a worktree. The item stays a single queue entry and its
+  status marker lands **below** the body:
 
   ```
   Claudia
   	: how do I resolve this? the IP changed
-  		@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@
-  		Host key verification failed.
-  			[EXECUTING]
+  	| @@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@
+  	| Host key verification failed.
+  		[EXECUTING]
   ```
 - `$command` lines run **once** in the session's **shell window** (the 2nd window,
   not the claude pane). A command is marked `[EXECUTING]` when dispatched and only

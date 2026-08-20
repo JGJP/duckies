@@ -360,7 +360,7 @@ check('a self-resumed [DONE] pane re-shows [EXECUTING], then settles back to [DO
 // dispatch as one `\n`-joined block; there's still only one queue item, and its completion
 // marker lands BELOW the body (not wedged between the prompt line and its body).
 const multiline = (() => {
-	let content = 'Claudia\n\t: how do I fix this?\n\t\tWARNING: bad\n\t\tHost key verification failed.\n'
+	let content = 'Claudia\n\t: how do I fix this?\n\t| WARNING: bad\n\t| Host key verification failed.\n'
 	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
 	const p0 = parse(content).sessions[0].prompts
 	const { lines, sessions } = parse(content)
@@ -369,12 +369,22 @@ const multiline = (() => {
 	return { count: p0.length, text: p0[0].text, dispatched: d.find((x) => x.type === 'prompt')?.text, content }
 })()
 check(
-	'a deeper-indented body folds into one multiline prompt with the marker below it',
+	'`|` lines fold into one multiline prompt with the marker below the body',
 	multiline.count === 1 &&
 		multiline.text === 'how do I fix this?\nWARNING: bad\nHost key verification failed.' &&
 		multiline.dispatched === multiline.text &&
 		multiline.content.includes('Host key verification failed.\n\t\t[EXECUTING]'),
 	JSON.stringify(multiline),
+)
+// The `|` prefix (and one following space) is stripped, but further leading spaces are kept,
+// so a body's own indentation survives — and a worktree at the same indent is untouched.
+const cont = parse('app\n\t: fix this:\n\t| TypeError\n\t|   at foo (a.ts:10)\n\tfeat\n\t\t: work\n')
+check(
+	'`|` body preserves inner indentation and does not swallow a following worktree',
+	cont.sessions[0].prompts[0].text === 'fix this:\nTypeError\n  at foo (a.ts:10)' &&
+		cont.sessions.some((s) => s.label === 'app-feat' && s.worktreeBase) &&
+		applyOps(cont.lines, buildOps(cont.sessions)).join('\n') === 'app\n\t: fix this:\n\t| TypeError\n\t|   at foo (a.ts:10)\n\tfeat\n\t\t: work\n',
+	JSON.stringify({ text: cont.sessions[0].prompts[0].text, labels: cont.sessions.map((s) => s.label) }),
 )
 
 // macroSteps: a macro body expands to runnable steps in RUN order (bottom-to-top, like every

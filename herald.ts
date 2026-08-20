@@ -217,6 +217,11 @@ const PROMPT_RE = /^(?:prompt:|(:+)(\d*))\s*/i
 const CMD_RE = /^(\$+)(\d*)\s*/
 // An indented `#` line is a barrier (halts the drain); `##`/`#2` halt lane 2 only, etc.
 const BARRIER_RE = /^(#+)(\d*)\s*/
+// A `|` line continues the prompt above it as a multiline body (YAML block-scalar style):
+// each body line is prefixed so it's unambiguous — never mistaken for a worktree — and its
+// own indentation is preserved. The `|` and one optional following space are stripped; the
+// rest (incl. any further leading spaces) is the literal text. A bare `|` is a blank line.
+const CONT_RE = /^\|[ ]?/
 // A sigil run of length `run` (e.g. `::` → 2) or an explicit `digits` suffix (which
 // wins) picks the 1-based lane. `prompt:`/plain sigils fall through to lane 1.
 const paneFromSigil = (run: string | undefined, digits: string | undefined): number => (digits ? Math.max(1, parseInt(digits, 10) || 1) : run ? run.length : 1)
@@ -277,11 +282,13 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		if (!cur) continue
 		cur.lastChildIdx = i
 		const t = line.trim()
-		// A line indented deeper than the prompt above it continues that prompt's text — a
-		// multiline body (e.g. a pasted error). Controller-written markers are deeper too,
-		// so exclude those; everything else folds in and is sent as one multiline prompt.
-		if (lastPrompt && tabs.length > lastPrompt.indent.length && !/^\[.*\]!?$/.test(t)) {
-			lastPrompt.text += `\n${t}`
+		// A `|` line continues the prompt above it — a multiline body (e.g. a pasted error),
+		// YAML block-scalar style. The `|` prefix makes each body line explicit, so it's never
+		// confused with a worktree; the text after `| ` (indentation preserved) folds in and the
+		// whole thing is sent as one multiline prompt. A run of `|` lines chains; anything else
+		// ends the body.
+		if (lastPrompt && CONT_RE.test(t)) {
+			lastPrompt.text += `\n${t.replace(CONT_RE, '')}`
 			lastPrompt.bodyEndIdx = i
 			continue
 		}

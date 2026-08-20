@@ -27,6 +27,14 @@
 			}
 		},
 		{
+			"comment": "Multiline prompt body: a `|` line continues the prompt above it (YAML block-scalar style), so a pasted body is never mistaken for a worktree.",
+			"match": "^\\t+ *(\\|)(.*)$",
+			"captures": {
+				"1": { "name": "keyword.control.prompt.herald" },
+				"2": { "name": "meta.prompt.herald" }
+			}
+		},
+		{
 			"comment": "Command: `$`/`$$`/`$2` runs in the shell window; the rest is the command.",
 			"match": "^\\t+ *(\\$+\\d*)(.*)$",
 			"captures": {
