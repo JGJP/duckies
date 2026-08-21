@@ -30,7 +30,16 @@ const ALIASES_FILE = process.env.HERALD_ALIASES ? resolve(process.env.HERALD_ALI
 const STATE = join(HERE, 'state')
 const RT_PATH = join(STATE, 'controller.json')
 const LOCK = join(STATE, 'supervisor.lock')
-const DEV_DIR = join(homedir(), '_dev')
+// Where a bare session name (not a path or alias) resolves: `<DEV_DIR>/<name>`.
+// `HERALD_DEV_DIR` overrides it; defaults to `~/_dev`.
+const DEV_DIR = process.env.HERALD_DEV_DIR ? resolve(process.env.HERALD_DEV_DIR) : join(homedir(), '_dev')
+// The command typed into a fresh claude pane to launch the agent. `HERALD_AGENT_CMD`
+// overrides it (e.g. a wrapper script or a different agent CLI).
+const AGENT_CMD = process.env.HERALD_AGENT_CMD || 'claude'
+// macOS only: the terminal app to bring to the foreground on a `show`/`!`, so a reveal
+// surfaces the window even under another app. Opt-in via `HERALD_TERM_APP` (e.g. `WezTerm`,
+// `iTerm`, `Terminal`); unset ⇒ no app foregrounding (the tmux client still switches).
+const TERM_APP = process.env.HERALD_TERM_APP
 // Labels the controller never manages (a blacklist). Empty by default.
 const RESERVED = new Set<string>([])
 const TICK_MS = 1000
@@ -778,7 +787,7 @@ async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: n
 	await tm`tmux set-option -p -t ${created} @herald ${role}`
 	if (kind === 'claude') {
 		await sleep(300)
-		await typeInto(created, 'claude')
+		await typeInto(created, AGENT_CMD)
 	}
 	return created
 }
@@ -805,7 +814,7 @@ async function doSpawn(label: string, dir: string) {
 	await tm`tmux set-option -p -t ${T(label)} @herald claude`
 	await makeShellWindow(label, dir)
 	await sleep(300)
-	await sendLine(label, 'claude')
+	await sendLine(label, AGENT_CMD)
 	// Leave the claude window focused so an attach shows it first.
 	await tm`tmux select-window -t ${await claudePane(label)}`
 	// The tmux steps above run with nothrow; a partial spawn leaves a half-formed
@@ -894,9 +903,9 @@ async function showSession(label: string, window?: Window) {
 	log(`showing ${T(label)}${window ? ` (${paneRole(window.kind, window.n)})` : ''}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
-	// Bring WezTerm (the terminal watching these sessions) to the foreground, so a
-	// `show`/`!` actually surfaces it even when another macOS app is focused. Best-effort.
-	await tm`osascript -e ${'tell application "WezTerm" to activate'}`
+	// Bring the configured terminal (the one watching these sessions) to the foreground, so a
+	// `show`/`!` actually surfaces it even when another app is focused. macOS + opt-in only.
+	if (process.platform === 'darwin' && TERM_APP) await tm`osascript -e ${`tell application "${TERM_APP}" to activate`}`
 	// Reveal the window the caller asked for (e.g. the shell for a `$command` show, or a
 	// numbered lane's pane), so switching the client lands on it rather than the session's
 	// last-active window.

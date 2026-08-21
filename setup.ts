@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, resolve } from 'node:path'
+import { homedir, platform } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fire } from '@jgjp/fire'
 
@@ -16,7 +16,15 @@ const zshHookPath = resolve(here, 'herald-zsh.sh')
 const zshrcPath = resolve(homedir(), '.zshrc')
 const settingsPath = resolve(homedir(), '.claude', 'settings.json')
 const sublimeSyntaxPath = resolve(here, 'herald.sublime-syntax')
-const sublimeUserDir = resolve(homedir(), '.config', 'sublime-text')
+// Sublime's `Packages/User` dir differs per OS. `HERALD_SUBLIME_DIR` overrides it.
+const sublimeUserDir = resolve(
+	process.env.HERALD_SUBLIME_DIR ??
+		(platform() === 'darwin'
+			? join(homedir(), 'Library', 'Application Support', 'Sublime Text', 'Packages', 'User')
+			: platform() === 'win32'
+				? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'Sublime Text', 'Packages', 'User')
+				: join(homedir(), '.config', 'sublime-text', 'Packages', 'User')),
+)
 const sublimeCopyPath = resolve(sublimeUserDir, 'herald.sublime-syntax')
 
 // Symlink the fish_postexec hook into fish's conf.d (fish auto-loads it). Repo

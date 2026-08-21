@@ -1,8 +1,31 @@
 {
 	"name": "herald",
 	"version": "1.0.0",
-	"private": true,
+	"description": "Run and control many interactive Claude Code instances in tmux through plain-text .herald files.",
+	"license": "MIT",
+	"author": "J Garcia",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://codeberg.org/setter/herald.git"
+	},
+	"homepage": "https://codeberg.org/setter/herald",
+	"bugs": {
+		"url": "https://codeberg.org/setter/herald/issues"
+	},
+	"keywords": [
+		"claude",
+		"claude-code",
+		"tmux",
+		"agent",
+		"orchestration",
+		"tui",
+		"supervisor"
+	],
+	"engines": {
+		"node": ">=18"
+	},
+	"packageManager": "pnpm@11.8.0",
 	"scripts": {
 		"start": "tsx herald.ts",
 		"herald": "tsx tui.ts",

@@ -13,6 +13,14 @@ place. If the same label appears in more than one file (or twice in one), all it
 are **merged into one queue** — each file's rows keep their place and markers write back
 to whichever file they came from.
 
+## Requirements
+
+- **tmux** and **Node 18+** (with `pnpm`) — required on any platform.
+- **Claude Code** (`claude`) on your `PATH` — or point `HERALD_AGENT_CMD` at another agent CLI.
+- A shell herald can install a completion hook for: **fish**, **zsh**, or **bash**.
+- **macOS** is optional-nice: set `HERALD_TERM_APP` to have a `show`/`!` foreground your
+  terminal app. Everything else (the supervisor, TUI, tmux control) is cross-platform.
+
 ## Setup (once)
 
 ```sh
@@ -508,13 +516,21 @@ core-iac
 spaces), `{*}` is all of them space-joined, and a missing one expands blank. Braces are
 used (not `$1`) so a placeholder never clashes with a `$2`/`:2` lane sigil inside the block.
 
-## Env overrides (mainly for testing)
+## Env overrides
 
 - `HERALD_DIR` — scan a different directory for `*.herald` files instead of the repo dir.
 - `HERALD_FILE` — single-file mode: watch exactly this one file (ignores the `*.herald` scan).
 - `HERALD_ALIASES` — read aliases from a different file instead of `./herald-aliases.yaml`.
 - `HERALD_MACROS` — read macros from a different file instead of `./herald-macros.yaml`.
+- `HERALD_DEV_DIR` — where a bare session name resolves (`<dir>/<name>`); default `~/_dev`.
+- `HERALD_AGENT_CMD` — the command launched in each claude pane; default `claude` (point it at
+  a wrapper or a different agent CLI).
+- `HERALD_TERM_APP` — macOS only, opt-in: the terminal app to bring to the foreground on a
+  `show`/`!` (e.g. `WezTerm`, `iTerm`, `Terminal`). Unset ⇒ no app foregrounding (the tmux
+  client still switches). Ignored off macOS.
 - `HERALD_READY_MS` — boot grace before the first prompt is sent (default 6000).
+- `HERALD_SUBLIME_DIR` — (setup only) override Sublime's `Packages/User` dir the syntax is
+  copied into.
 
 ## Test
 

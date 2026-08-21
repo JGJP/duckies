@@ -642,11 +642,11 @@ check('an executing session still counts as pending (resume after restart)', has
 check('a fully drained queue (frontier at top, nulls below) has no pending input', !hasPendingInput(parse('alpha\n\t: newest\n\t\t[DONE]\n\t: old\n').sessions[0]))
 
 // 6. Path-form headers: label = basename, bare names still map by name.
-const pathFile = '~/_dev/_startale/superapp\n\tprompt: hi\n/abs/path/foo\nbarename\n'
+const pathFile = '~/projects/superapp\n\tprompt: hi\n/abs/path/foo\nbarename\n'
 const pf = parse(pathFile)
 check(
 	'path header -> basename label',
-	pf.sessions[0].label === 'superapp' && pf.sessions[0].dir.endsWith('/_dev/_startale/superapp'),
+	pf.sessions[0].label === 'superapp' && pf.sessions[0].dir.endsWith('/projects/superapp'),
 	`${pf.sessions[0].label} / ${pf.sessions[0].dir}`,
 )
 check('absolute path header', pf.sessions[1].label === 'foo' && pf.sessions[1].dir === '/abs/path/foo')
