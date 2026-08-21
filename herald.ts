@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import {
+	cpSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
@@ -52,14 +53,27 @@ const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`)
 const expandHome = (p: string): string =>
 	p.startsWith('~') ? join(homedir(), p.slice(p[1] === '/' ? 2 : 1)) : p
 
-export type Aliases = Record<string, string>
+// An alias value is either a bare path, or an object with the path plus optional worktree
+// setup: `worktree/cmd` (shell commands run in a freshly created worktree) and
+// `worktree/copy` (files/dirs copied in from the base repo, e.g. gitignored `.env`).
+export interface AliasEntry {
+	dir: string
+	'worktree/cmd'?: string[]
+	'worktree/copy'?: string[]
+}
+export type Aliases = Record<string, string | AliasEntry>
+const aliasDir = (e: string | AliasEntry): string => (typeof e === 'string' ? e : e.dir)
+// The worktree setup for an alias entry (undefined for a bare-path alias, a path header, or a
+// bare name — only the object form carries it).
+export const aliasWorktree = (e: string | AliasEntry | undefined): { cmd?: string[]; copy?: string[] } | undefined =>
+	e && typeof e === 'object' ? { cmd: e['worktree/cmd'], copy: e['worktree/copy'] } : undefined
 
 // Resolve a session header to a tmux label and working dir. Precedence:
 //   1. an exact alias key → label = the alias, dir = its mapped path;
 //   2. a path (bare `/`, `~/…`, or anything with `/`) → that dir, label = basename;
 //   3. a bare name → dir `~/_dev/<name>`, label = name.
 function resolveTarget(header: string, aliases: Aliases = {}): { label: string; dir: string } {
-	if (aliases[header]) return { label: header, dir: resolve(expandHome(aliases[header])) }
+	if (aliases[header]) return { label: header, dir: resolve(expandHome(aliasDir(aliases[header]))) }
 	if (header.startsWith('/') || header.startsWith('~') || header.includes('/')) {
 		const dir = resolve(expandHome(header))
 		return { label: basename(dir), dir }
@@ -67,13 +81,21 @@ function resolveTarget(header: string, aliases: Aliases = {}): { label: string; 
 	return { label: header, dir: join(DEV_DIR, header) }
 }
 
-// Load the label→path alias map, tolerating a missing/empty/malformed file.
+// Load the label→(path | {dir, worktree/*}) alias map, tolerating a missing/empty/malformed
+// file. A string value is a bare path; an object must carry a string `dir` (plus optional
+// string-array `worktree/cmd` and `worktree/copy`); anything else is dropped.
 function loadAliases(): Aliases {
 	try {
 		const parsed = YAML.parse(readFileSync(ALIASES_FILE, 'utf8'))
 		if (!parsed || typeof parsed !== 'object') return {}
 		const out: Aliases = {}
-		for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') out[k] = v
+		const strs = (v: unknown): string[] | undefined => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
+		for (const [k, v] of Object.entries(parsed)) {
+			if (typeof v === 'string') out[k] = v
+			else if (v && typeof v === 'object' && typeof (v as AliasEntry).dir === 'string') {
+				out[k] = { dir: (v as AliasEntry).dir, 'worktree/cmd': strs((v as AliasEntry)['worktree/cmd']), 'worktree/copy': strs((v as AliasEntry)['worktree/copy']) }
+			}
+		}
 		return out
 	} catch {
 		return {}
@@ -195,6 +217,11 @@ interface Session {
 	// `<repo>/../<repo>-worktrees/<name>`) is created on demand — `git worktree add --detach` — the
 	// first tick the worktree has work, then spawned like any session.
 	worktreeBase?: string
+	// Worktree setup from the base repo's alias entry (`worktree/cmd`, `worktree/copy`): shell
+	// commands to run in a freshly created worktree and files/dirs to copy in from the base.
+	// Set on a repo header from its alias and inherited by its worktree children.
+	worktreeCmd?: string[]
+	worktreeCopy?: string[]
 	headerIdx: number
 	lastChildIdx: number
 	prompts: Prompt[]
@@ -271,9 +298,12 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 			const showNow = raw.endsWith('!')
 			const header = showNow ? raw.slice(0, -1).trimEnd() : raw
 			const { label, dir } = resolveTarget(header, aliases)
+			const wtCfg = aliasWorktree(aliases[header])
 			cur = {
 				label,
 				dir,
+				worktreeCmd: wtCfg?.cmd,
+				worktreeCopy: wtCfg?.copy,
 				headerIdx: i,
 				lastChildIdx: i,
 				prompts: [],
@@ -431,6 +461,8 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				label: `${target.label}-${name}`,
 				dir: join(dirname(target.dir), `${basename(target.dir)}-worktrees`, name),
 				worktreeBase: target.dir,
+				worktreeCmd: target.worktreeCmd,
+				worktreeCopy: target.worktreeCopy,
 				headerIdx: i,
 				lastChildIdx: i,
 				prompts: [],
@@ -824,8 +856,10 @@ async function doSpawn(label: string, dir: string) {
 }
 
 // Create a detached-HEAD git worktree of `base` at `dir` (its parent dirs made first), then
-// spawn the session in it. Runs once, the first tick a worktree session has work.
-async function addWorktreeAndSpawn(label: string, base: string, dir: string) {
+// run the base repo's worktree setup — copy files/dirs in from `base` (`worktree/copy`, e.g.
+// a gitignored `.env`), then run its commands in the worktree (`worktree/cmd`, e.g. install) —
+// and spawn the session in it. Runs once, the first tick a worktree session has work.
+async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg: { cmd?: string[]; copy?: string[] } = {}) {
 	log(`worktree add ${dir} (from ${base})`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
@@ -834,6 +868,30 @@ async function addWorktreeAndSpawn(label: string, base: string, dir: string) {
 	if (r.exitCode !== 0) {
 		log(`WARN worktree add failed for ${T(label)}: ${r.stderr.trim()}`)
 		return
+	}
+	// Copy each path (relative to the base repo) into the new worktree — files/dirs git
+	// doesn't track (`.env`, build caches) that setup needs. Missing sources warn and skip.
+	for (const rel of cfg.copy ?? []) {
+		const src = join(base, rel)
+		if (!existsSync(src)) {
+			log(`WARN worktree ${T(label)}: copy source missing, skipping: ${rel}`)
+			continue
+		}
+		log(`worktree ${T(label)}: copy ${rel}`)
+		try {
+			cpSync(src, join(dir, rel), { recursive: true })
+		} catch (e) {
+			log(`WARN worktree ${T(label)}: copy failed for ${rel}: ${(e as Error).message}`)
+		}
+	}
+	// Run each setup command in the worktree. Prefer the user's login shell (`$SHELL -lc`) so
+	// PATH and env managers (asdf/nvm/direnv) apply the way they do in a real pane; fall back
+	// to `sh -c` if `$SHELL` is unset.
+	const sh = $({ cwd: dir, nothrow: true, quiet: true })
+	for (const cmd of cfg.cmd ?? []) {
+		log(`worktree ${T(label)}: run ${JSON.stringify(cmd)}`)
+		const rr = process.env.SHELL ? await sh`${process.env.SHELL} -lc ${cmd}` : await sh`sh -c ${cmd}`
+		if (rr.exitCode !== 0) log(`WARN worktree ${T(label)}: cmd failed (exit ${rr.exitCode}): ${cmd}`)
 	}
 	await doSpawn(label, dir)
 }
@@ -1261,7 +1319,8 @@ async function tick(rt: Rt) {
 				}
 				rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, worktreeDir: dir, worktreeBase: s.worktreeBase }
 				const base = s.worktreeBase
-				actions.push(() => addWorktreeAndSpawn(label, base, dir))
+				const cfg = { cmd: s.worktreeCmd, copy: s.worktreeCopy }
+				actions.push(() => addWorktreeAndSpawn(label, base, dir, cfg))
 				continue
 			}
 			s.desiredSession = `[NO DIR ${dir}]`

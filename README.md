@@ -471,6 +471,27 @@ infra: ~/work/infra-monorepo
 The file is re-read every tick, so alias edits take effect without a restart. A
 header that isn't a listed alias falls back to the path / bare-name rules above.
 
+### Per-repo worktree setup
+
+Give an alias the **object form** to run setup when a [worktree](#the-herald-files) of that
+repo is first created (right after `git worktree add`, before the session spawns; inherited
+by nested worktrees):
+
+```yaml
+webapp:
+  dir: ~/projects/webapp
+  worktree/copy:            # files/dirs copied in from the base repo (relative paths) —
+    - .env                  # for things git doesn't track but setup needs
+    - .env.local
+  worktree/cmd:             # shell commands run in the new worktree, in order
+    - pnpm install
+    - direnv allow
+```
+
+`worktree/copy` runs first (a missing source warns and is skipped), then `worktree/cmd` runs
+in the worktree via your login shell (`$SHELL`). Both are skipped in `--dry-run`. Note the
+setup runs inline during that tick, so a slow `install` briefly delays the supervisor loop.
+
 ## Macros (`herald-macros.yaml`)
 
 Optional. A YAML map of `name: |<multiline block>`, so a `@name` line on its own in a

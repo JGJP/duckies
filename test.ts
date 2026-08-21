@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { applyOps, buildOps, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planQueue, reapTargets } from './herald'
+import { aliasWorktree, applyOps, buildOps, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planQueue, reapTargets } from './herald'
 import { merge3, nearestIndex, toLines } from './tui'
 
 let failures = 0
@@ -474,6 +474,18 @@ check('a worktree task keeps its own marker (deeper indent) and round-trips', wt
 // prefix chains through nesting, while the dir leaf stays the bare on-disk name.
 const wtPrefix = parse('app-4\n\tfeat\n\t\tsub\n\t\t\t: deep\n').sessions.filter((s) => s.worktreeBase)
 check('a worktree label is prefixed with its repo, chaining through nesting', wtPrefix[0].label === 'app-4-feat' && wtPrefix[1].label === 'app-4-feat-sub' && wtPrefix[0].dir.endsWith('/app-4-worktrees/feat') && wtPrefix[1].dir.endsWith('/feat-worktrees/sub'), JSON.stringify(wtPrefix.map((s) => [s.label, s.dir])))
+
+// An object-form alias carries per-repo worktree setup (`worktree/cmd`, `worktree/copy`). The
+// repo header resolves its `dir` like a string alias and holds the setup; a worktree child
+// inherits it (that's what addWorktreeAndSpawn runs after `git worktree add`).
+const wtAlias = { app: { dir: '/opt/superapp', 'worktree/cmd': ['pnpm install', 'direnv allow'], 'worktree/copy': ['.env', 'node_modules'] }, plain: '/opt/plain' }
+const wa = parse('app\n\tfeat\n\t\t: work\nplain\n\twt2\n\t\t: go\n', wtAlias)
+const waRepo = wa.sessions.find((s) => s.label === 'app')!
+const waWt = wa.sessions.find((s) => s.label === 'app-feat')!
+check('object-form alias resolves dir and holds worktree setup', waRepo.dir === '/opt/superapp' && JSON.stringify(waRepo.worktreeCmd) === JSON.stringify(['pnpm install', 'direnv allow']) && JSON.stringify(waRepo.worktreeCopy) === JSON.stringify(['.env', 'node_modules']))
+check('a worktree child inherits its base repo worktree setup', JSON.stringify(waWt.worktreeCmd) === JSON.stringify(['pnpm install', 'direnv allow']) && JSON.stringify(waWt.worktreeCopy) === JSON.stringify(['.env', 'node_modules']))
+check('a string-form alias carries no worktree setup', wa.sessions.find((s) => s.label === 'plain-wt2')!.worktreeCmd === undefined)
+check('aliasWorktree: object yields its lists, string yields undefined', JSON.stringify(aliasWorktree(wtAlias.app)) === JSON.stringify({ cmd: ['pnpm install', 'direnv allow'], copy: ['.env', 'node_modules'] }) && aliasWorktree('/opt/plain') === undefined)
 
 // Teardown: a live `__` session no longer in the model is reaped. A worktree session (its
 // dir/base stamped in rt while alive) is reaped WITH its worktree so it's cleaned up from
