@@ -5,3 +5,4 @@ herald-control
 herald-actions
 herald-aliases.yaml
 herald-macros.yaml
+.backup/
