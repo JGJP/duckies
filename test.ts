@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildOps, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho } from './herald'
+import { aliasWorktree, applyOps, buildOps, dropDuringAttention, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho } from './herald'
 import { merge3, nearestIndex, toLines } from './tui'
 
 let failures = 0
@@ -98,37 +98,41 @@ m2b.sessions[1].prompts[0].desiredKind = null
 const cleared = applyOps(m2b.lines, buildOps(m2b.sessions)).join('\n')
 check('clearing attention removes the marker line', !cleared.includes('[NEEDS ATTENTION]') && cleared.includes('prompt: investigate the flaky test\nsuperapp-3'))
 
-// 4c. A `!` appended to a marker ("reveal this item's window now") parses as an
-// ordinary marker plus a one-shot showNow request; unfired it round-trips verbatim,
-// and once fired buildOps strips the `!` (leaving the plain marker).
-const bangAttn = 'alpha\n\t: fix it\n\t\t[NEEDS ATTENTION]!\n'
+// 4c. A leading `!` on a marker ("reveal this item's window now") parses as an ordinary
+// marker plus a one-shot showNow request; unfired it round-trips verbatim, and once fired
+// buildOps strips the `!` (leaving the plain marker).
+const bangAttn = 'alpha\n\t: fix it\n\t\t![NEEDS ATTENTION]\n'
 const ba = parse(bangAttn)
 check('marker `!` parses as its kind + a showNow request', ba.sessions[0].prompts[0].marker?.kind === 'ATTENTION' && ba.sessions[0].prompts[0].showNow === true)
 check('an unfired marker `!` round-trips verbatim', applyOps(ba.lines, buildOps(ba.sessions)).join('\n') === bangAttn)
 ba.sessions[0].prompts[0].showNowFired = true
 check('a fired marker `!` is stripped to the plain marker', applyOps(ba.lines, buildOps(ba.sessions)).join('\n') === 'alpha\n\t: fix it\n\t\t[NEEDS ATTENTION]\n')
 // A `!` on a `$command`'s [EXECUTING] marker targets the shell window; on a prompt, claude.
-const baCmd = parse('alpha\n\t$ deploy\n\t\t[EXECUTING]!\n')
+const baCmd = parse('alpha\n\t$ deploy\n\t\t![EXECUTING]\n')
 check('marker `!` on a command keeps the shell as its window', baCmd.sessions[0].prompts[0].isCmd === true && baCmd.sessions[0].prompts[0].showNow === true)
 
-// 4d. A space-separated trailing `!` on the item's own line ("reveal this item's
-// window now") sets a one-shot showNow without touching the item's text; unfired it
-// round-trips verbatim, and once fired buildOps strips the ` !` from that line.
-const inlineP = 'alpha\n\t: look at this !\n'
+// 4d. A leading `!` on the item's own line ("reveal this item's window now") sets a one-shot
+// showNow without touching the item's text; unfired it round-trips verbatim, and once fired
+// buildOps strips the `!` from that line.
+const inlineP = 'alpha\n\t!: look at this\n'
 const ip = parse(inlineP)
-check('inline `!` on a prompt sets showNow + strips it from the text', ip.sessions[0].prompts[0].showNow === true && ip.sessions[0].prompts[0].text === 'look at this' && ip.sessions[0].prompts[0].isCmd === false)
-check('an unfired inline `!` round-trips verbatim', applyOps(ip.lines, buildOps(ip.sessions)).join('\n') === inlineP)
+check('leading `!` on a prompt sets showNow + keeps clean text', ip.sessions[0].prompts[0].showNow === true && ip.sessions[0].prompts[0].text === 'look at this' && ip.sessions[0].prompts[0].isCmd === false)
+check('an unfired leading `!` round-trips verbatim', applyOps(ip.lines, buildOps(ip.sessions)).join('\n') === inlineP)
 ip.sessions[0].prompts[0].showNowFired = true
-check('a fired inline `!` is stripped from the item line', applyOps(ip.lines, buildOps(ip.sessions)).join('\n') === 'alpha\n\t: look at this\n')
+check('a fired leading `!` is stripped from the item line', applyOps(ip.lines, buildOps(ip.sessions)).join('\n') === 'alpha\n\t: look at this\n')
 // Firing coexists with a marker inserted the same tick (strip + insert on one line).
 ip.sessions[0].prompts[0].desiredKind = 'EXECUTING'
-check('a fired inline `!` strips and still gets its marker', applyOps(ip.lines, buildOps(ip.sessions)).join('\n') === 'alpha\n\t: look at this\n\t\t[EXECUTING]\n')
+check('a fired leading `!` strips and still gets its marker', applyOps(ip.lines, buildOps(ip.sessions)).join('\n') === 'alpha\n\t: look at this\n\t\t[EXECUTING]\n')
 // On a `$command` the reveal targets the shell window, and the command text is clean.
-const inlineC = parse('alpha\n\t$ gpo !\n')
-check('inline `!` on a command sets showNow, targets shell, keeps clean text', inlineC.sessions[0].prompts[0].isCmd === true && inlineC.sessions[0].prompts[0].showNow === true && inlineC.sessions[0].prompts[0].text === 'gpo')
-// Ordinary end punctuation (no separating space) stays text, not a reveal.
-const punct = parse('alpha\n\t: ship it!\n')
-check('a bare trailing `!` (no space) is text, not a reveal', punct.sessions[0].prompts[0].showNow === undefined && punct.sessions[0].prompts[0].text === 'ship it!')
+const inlineC = parse('alpha\n\t!$ gpo\n')
+check('leading `!` on a command sets showNow, targets shell, keeps clean text', inlineC.sessions[0].prompts[0].isCmd === true && inlineC.sessions[0].prompts[0].showNow === true && inlineC.sessions[0].prompts[0].text === 'gpo')
+// A space after the leading `!` is also fine.
+check('a space-separated leading `! ` also reveals', parse('alpha\n\t! : look at this\n').sessions[0].prompts[0].showNow === true && parse('alpha\n\t! : look at this\n').sessions[0].prompts[0].text === 'look at this')
+// A bare `!` line is still shorthand for `show`, never swallowed as a leading-bang.
+check('a bare `!` line stays a show item, not a leading-bang', parse('alpha\n\t!\n').sessions[0].prompts[0].isShow === true)
+// A trailing `!` is now ordinary text, never a reveal — only a leading `!` reveals.
+const punct = parse('alpha\n\t: ship it !\n')
+check('a trailing `!` is text, not a reveal', punct.sessions[0].prompts[0].showNow === undefined && punct.sessions[0].prompts[0].text === 'ship it !')
 
 // 5. Minimal file with a single session.
 const single = 'alpha\n\tprompt: do a\n\tprompt: do b\n'
@@ -435,6 +439,22 @@ check(
 	JSON.stringify(macroRun),
 )
 
+// 7c. A leading `!` on a `@macro` call reveals its claude pane, like on a plain prompt: it
+// sets a one-shot showNow, keeps the macro name/args clean (so it still resolves), stays one
+// item, round-trips verbatim while unfired, and strips the `!` once fired.
+const leadMacro = parse('app\n\t!@ship 2500\n', {}, { ship: ': prep {0}\n' })
+check(
+	'leading `!` on a @macro sets showNow, stays one clean macro item',
+	leadMacro.sessions[0].prompts.length === 1 &&
+		leadMacro.sessions[0].prompts[0].isMacro === true &&
+		leadMacro.sessions[0].prompts[0].showNow === true &&
+		leadMacro.sessions[0].prompts[0].text === '@ship 2500',
+	JSON.stringify(leadMacro.sessions[0].prompts[0]),
+)
+check('an unfired leading `!` @macro round-trips verbatim', applyOps(leadMacro.lines, buildOps(leadMacro.sessions)).join('\n') === 'app\n\t!@ship 2500\n')
+leadMacro.sessions[0].prompts[0].showNowFired = true
+check('a fired leading `!` @macro is stripped to the plain call', applyOps(leadMacro.lines, buildOps(leadMacro.sessions)).join('\n') === 'app\n\t@ship 2500\n')
+
 // Worktrees: an indented non-sigil line names a git worktree of its enclosing repo — a child
 // session at `<repo>/../<repo>-worktrees/<name>` whose deeper-indented children are its queue items.
 // A childless non-sigil line is an inert session (never created).
@@ -499,19 +519,19 @@ check('a session still in the model (or reserved) is not reaped', !reaped.some((
 // removed from disk — never throws on the absent entry.
 check('a reaped label with no rt entry yields a null worktree', reapTargets(['gone'], new Set<string>(), new Set<string>(), {}).every((r) => r.worktree === null))
 
-// A trailing `!` on a worktree label means "show it now", exactly like on a repo header:
+// A leading `!` on a worktree label means "show it now", exactly like on a repo header:
 // it's stripped from the tmux label and the on-disk dir leaf so both stay clean.
-const wtBang = parse('repo\n\tfeat !\n\t\t: do it\n').sessions.find((s) => s.worktreeBase)!
+const wtBang = parse('repo\n\t!feat\n\t\t: do it\n').sessions.find((s) => s.worktreeBase)!
 check('a worktree `!` sets showNow and cleans the label/dir', wtBang.showNow === true && wtBang.label === 'repo-feat' && wtBang.header === 'feat' && wtBang.dir.endsWith('/repo-worktrees/feat'))
-// Unfired, the `!` round-trips verbatim (indent preserved); once fired, buildOps strips
-// just the `!`, keeping the worktree's leading tab.
-const wtBangParse = parse('repo\n\tfeat !\n\t\t: do it\n')
-check('an unfired worktree `!` round-trips verbatim', applyOps(wtBangParse.lines, buildOps(wtBangParse.sessions)).join('\n') === 'repo\n\tfeat !\n\t\t: do it\n')
-wtBangParse.sessions.find((s) => s.worktreeBase)!.showNowFired = true
-check('a fired worktree `!` is stripped, keeping the indent', applyOps(wtBangParse.lines, buildOps(wtBangParse.sessions)).join('\n') === 'repo\n\tfeat\n\t\t: do it\n')
 // A worktree with a `!` but no queued work still counts as pending-to-show, so the spawn
 // gate (which ORs showNow with hasPendingInput) will create + reveal it.
-check('a bare worktree `!` carries showNow even with no work', parse('repo\n\tfeat !\n').sessions.find((s) => s.worktreeBase)!.showNow === true)
+check('a bare worktree `!` carries showNow even with no work', parse('repo\n\t!feat\n').sessions.find((s) => s.worktreeBase)!.showNow === true)
+// A leading `!` on a worktree label reveals it too, and strips clean once fired.
+const wtLead = parse('repo\n\t!feat\n\t\t: do it\n')
+check('a leading `!` on a worktree sets showNow and cleans the label/dir', wtLead.sessions.find((s) => s.worktreeBase)!.showNow === true && wtLead.sessions.find((s) => s.worktreeBase)!.label === 'repo-feat' && wtLead.sessions.find((s) => s.worktreeBase)!.dir.endsWith('/repo-worktrees/feat'))
+check('an unfired leading worktree `!` round-trips verbatim', applyOps(wtLead.lines, buildOps(wtLead.sessions)).join('\n') === 'repo\n\t!feat\n\t\t: do it\n')
+wtLead.sessions.find((s) => s.worktreeBase)!.showNowFired = true
+check('a fired leading worktree `!` is stripped, keeping the indent', applyOps(wtLead.lines, buildOps(wtLead.sessions)).join('\n') === 'repo\n\tfeat\n\t\t: do it\n')
 
 // A worktree whose base doesn't exist can't be created, so the tick stamps a session marker
 // ([NO DIR …]) that buildOps writes below the worktree's own block at the worktree's indent + 1
@@ -654,11 +674,11 @@ check('show with nothing before it defaults to the claude window', showWindowOf(
 // A header `!` reveals the frontier item's window: whatever is [EXECUTING] (a command
 // -> shell, a prompt -> claude), else the most recently [DONE] one, else nothing.
 const fw = (s: string) => frontierWindow(parse(s).sessions[0])?.kind
-check('frontier window is the executing command\'s shell', fw('alpha!\n\t$ deploy\n\t\t[EXECUTING]\n') === 'shell', String(fw('alpha!\n\t$ deploy\n\t\t[EXECUTING]\n')))
-check('frontier window is the executing prompt\'s claude', fw('alpha!\n\t: work\n\t\t[EXECUTING]\n') === 'claude', String(fw('alpha!\n\t: work\n\t\t[EXECUTING]\n')))
-check('executing wins over a done item below it', fw('alpha!\n\t: work\n\t\t[EXECUTING]\n\t$ built\n\t\t[DONE]\n') === 'claude', String(fw('alpha!\n\t: work\n\t\t[EXECUTING]\n\t$ built\n\t\t[DONE]\n')))
-check('with nothing executing, the last [DONE] wins', fw('alpha!\n\t$ built\n\t\t[DONE]\n') === 'shell', String(fw('alpha!\n\t$ built\n\t\t[DONE]\n')))
-check('frontier window is undefined when nothing has run', fw('alpha!\n\t: pending\n') === undefined, String(fw('alpha!\n\t: pending\n')))
+check('frontier window is the executing command\'s shell', fw('!alpha\n\t$ deploy\n\t\t[EXECUTING]\n') === 'shell', String(fw('!alpha\n\t$ deploy\n\t\t[EXECUTING]\n')))
+check('frontier window is the executing prompt\'s claude', fw('!alpha\n\t: work\n\t\t[EXECUTING]\n') === 'claude', String(fw('!alpha\n\t: work\n\t\t[EXECUTING]\n')))
+check('executing wins over a done item below it', fw('!alpha\n\t: work\n\t\t[EXECUTING]\n\t$ built\n\t\t[DONE]\n') === 'claude', String(fw('!alpha\n\t: work\n\t\t[EXECUTING]\n\t$ built\n\t\t[DONE]\n')))
+check('with nothing executing, the last [DONE] wins', fw('!alpha\n\t$ built\n\t\t[DONE]\n') === 'shell', String(fw('!alpha\n\t$ built\n\t\t[DONE]\n')))
+check('frontier window is undefined when nothing has run', fw('!alpha\n\t: pending\n') === undefined, String(fw('!alpha\n\t: pending\n')))
 
 // A `show` sitting above a `#` barrier waits: the barrier halts the drain before it.
 const showBehindBarrier = drain('alpha\n\tshow\n\t# manual\n\t: first\n')
@@ -691,17 +711,24 @@ check('alias header -> mapped path, label = alias', aliased.sessions[0].label ==
 check('alias `~` expands to home', parse('other\n', { other: '~/x' }).sessions[0].dir.endsWith('/x') && !parse('other\n', { other: '~/x' }).sessions[0].dir.startsWith('~'))
 check('non-aliased bare name still maps to ~/_dev/<name>', aliased.sessions[1].dir.endsWith('/_dev/barename'))
 
-// 6c. A `!` suffix on a header means "show it immediately": the label/dir resolve
+// 6c. A leading `!` on a header means "show it immediately": the label/dir resolve
 // from the name without the `!`, and firing the request strips the `!` from the line.
-const bang = parse('superapp!\n\t: do a\n')
+const bang = parse('!superapp\n\t: do a\n')
 check('`!` header sets showNow and resolves the name without it', bang.sessions[0].showNow === true && bang.sessions[0].label === 'superapp' && bang.sessions[0].dir.endsWith('/_dev/superapp'))
 check('a plain header has showNow false', parse('superapp\n').sessions[0].showNow === false)
-check('an unfired `!` header round-trips verbatim', applyOps(bang.lines, buildOps(bang.sessions)).join('\n') === 'superapp!\n\t: do a\n')
+check('an unfired `!` header round-trips verbatim', applyOps(bang.lines, buildOps(bang.sessions)).join('\n') === '!superapp\n\t: do a\n')
 bang.sessions[0].showNowFired = true
 check('firing a `!` header strips the `!` from the line', applyOps(bang.lines, buildOps(bang.sessions)).join('\n') === 'superapp\n\t: do a\n')
 // `!` composes with aliases and paths (resolve the name without the `!`).
-check('`!` composes with an alias header', parse('app!\n', { app: '/opt/x' }).sessions[0].showNow === true && parse('app!\n', { app: '/opt/x' }).sessions[0].dir === '/opt/x')
-check('`!` composes with a path header', parse('/abs/foo!\n').sessions[0].showNow === true && parse('/abs/foo!\n').sessions[0].dir === '/abs/foo' && parse('/abs/foo!\n').sessions[0].label === 'foo')
+check('`!` composes with an alias header', parse('!app\n', { app: '/opt/x' }).sessions[0].showNow === true && parse('!app\n', { app: '/opt/x' }).sessions[0].dir === '/opt/x')
+check('`!` composes with a path header', parse('!/abs/foo\n').sessions[0].showNow === true && parse('!/abs/foo\n').sessions[0].dir === '/abs/foo' && parse('!/abs/foo\n').sessions[0].label === 'foo')
+// A leading `!` on a header reveals it too: same resolution, same strip-on-fire.
+const leadHdr = parse('!superapp\n\t: do a\n')
+check('leading `!` header sets showNow and resolves the name without it', leadHdr.sessions[0].showNow === true && leadHdr.sessions[0].label === 'superapp' && leadHdr.sessions[0].dir.endsWith('/_dev/superapp'))
+check('an unfired leading `!` header round-trips verbatim', applyOps(leadHdr.lines, buildOps(leadHdr.sessions)).join('\n') === '!superapp\n\t: do a\n')
+leadHdr.sessions[0].showNowFired = true
+check('firing a leading `!` header strips the `!` from the line', applyOps(leadHdr.lines, buildOps(leadHdr.sessions)).join('\n') === 'superapp\n\t: do a\n')
+check('a leading `!` composes with an alias header', parse('!app\n', { app: '/opt/x' }).sessions[0].showNow === true && parse('!app\n', { app: '/opt/x' }).sessions[0].dir === '/opt/x')
 
 // 7. Blank lines between sessions are skipped but preserved on round-trip.
 const withBlanks = 'superapp\n\tprompt: do a thing\n\nsuperapp-2\n\tprompt: do another\n'
@@ -815,6 +842,20 @@ check(
 	// without stealing its marker — the shell and claude panes run concurrently.
 	const out = capApply('repo\n\t: working\n\t\t[EXECUTING]\n', 1, [{ text: 'git status', isCmd: true }])
 	check('a command during a live prompt logs below it, leaving [EXECUTING] intact', out === 'repo\n\t: working\n\t\t[EXECUTING]\n\t$ git status\n', out)
+}
+{
+	// A shell command typed while the frontier is [NEEDS ATTENTION] is dropped, not captured —
+	// capturing it would steal the marker and flip [NEEDS ATTENTION] to [DONE].
+	const s = parse('repo\n\t: needs you\n\t\t[NEEDS ATTENTION]\n').sessions[0]
+	check('a command during [NEEDS ATTENTION] is dropped', JSON.stringify(dropDuringAttention(s, 1, [{ text: 'git log', isCmd: true }])) === '[]')
+	// A prompt still passes through — answering the prompt legitimately resolves the attention.
+	check(
+		'a prompt during [NEEDS ATTENTION] is kept (drops only commands)',
+		JSON.stringify(dropDuringAttention(s, 1, [{ text: 'go on', isCmd: false }, { text: 'git log', isCmd: true }])) === '[{"text":"go on","isCmd":false}]',
+	)
+	// Outside [NEEDS ATTENTION] commands are untouched.
+	const live = parse('repo\n\t: working\n\t\t[EXECUTING]\n').sessions[0]
+	check('a command during [EXECUTING] is untouched', JSON.stringify(dropDuringAttention(live, 1, [{ text: 'git log', isCmd: true }])) === '[{"text":"git log","isCmd":true}]')
 }
 
 {

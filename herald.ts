@@ -11,6 +11,7 @@ import {
 	statSync,
 	symlinkSync,
 	unlinkSync,
+	watch,
 	writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -39,12 +40,34 @@ const DEV_DIR = process.env.HERALD_DEV_DIR ? resolve(process.env.HERALD_DEV_DIR)
 // The command typed into a fresh claude pane to launch the agent. `HERALD_AGENT_CMD`
 // overrides it (e.g. a wrapper script or a different agent CLI).
 const AGENT_CMD = process.env.HERALD_AGENT_CMD || 'claude'
-// Instruction appended to every herald-launched claude: end each turn with a one-line `-> `
-// summary, which the note pass mirrors into the `.herald` file below the finished prompt.
-// Skipped when HERALD_AGENT_CMD is a non-claude wrapper (the flag wouldn't exist).
+// Instruction folded into every herald-launched claude's system prompt: end each turn with a
+// one-line `-> ` summary, which the note pass mirrors into the `.herald` file below the
+// finished prompt. Delivered via a system-prompt *file* (see launchCmd), not `--append-system-
+// prompt`, because that flag can't coexist with the `--append-system-prompt-file` a wrapping
+// `claude` may already pass — and repeated `-file` flags are last-wins, not merged.
 const NOTE_PROMPT =
-	'When you finish responding to a prompt in this session, end your final message with a single line beginning with -> that gives a concise one-line summary of what you did.'
-const LAUNCH_CMD = /(^|[\s/])claude(\s|$)/.test(AGENT_CMD) ? `${AGENT_CMD} --append-system-prompt '${NOTE_PROMPT}'` : AGENT_CMD
+	'When you finish responding to a prompt in this session, end your final message with a single line beginning with -> that gives a terse summary of what you did: aim for about 3-6 words, plain text (no backticks, code, or long paths — a bare filename is fine). E.g. "-> Updated watch-pr-comments.md".'
+// A base system-prompt file to fold in, so a `--append-system-prompt-file` already on the
+// launch (e.g. a personal prompt added by a shell `claude` wrapper) isn't lost to last-wins:
+// herald's file must be a superset. Defaults to the common fish-wrapper path; override or set
+// empty to fold in nothing. Rebuilt each launch, so edits to it apply on the next spawn.
+const BASE_SYSTEM_PROMPT_FILE = process.env.HERALD_SYSTEM_PROMPT_FILE ?? join(homedir(), '.config', 'fish', 'claude-system-prompt')
+const SYSTEM_PROMPT_FILE = join(STATE, 'system-prompt')
+const AGENT_IS_CLAUDE = /(^|[\s/])claude(\s|$)/.test(AGENT_CMD)
+// Build the combined system-prompt file (base + note instruction) and return the launch line.
+// Non-claude agents (a custom HERALD_AGENT_CMD) launch as-is — the flag wouldn't exist.
+function launchCmd(): string {
+	if (!AGENT_IS_CLAUDE) return AGENT_CMD
+	let base = ''
+	if (BASE_SYSTEM_PROMPT_FILE) {
+		try {
+			base = `${readFileSync(BASE_SYSTEM_PROMPT_FILE, 'utf8').trimEnd()}\n\n`
+		} catch {}
+	}
+	mkdirSync(STATE, { recursive: true })
+	writeFileSync(SYSTEM_PROMPT_FILE, `${base}${NOTE_PROMPT}\n`)
+	return `${AGENT_CMD} --append-system-prompt-file '${SYSTEM_PROMPT_FILE}'`
+}
 // macOS only: the terminal app to bring to the foreground on a `show`/`!`, so a reveal
 // surfaces the window even under another app. Opt-in via `HERALD_TERM_APP` (e.g. `WezTerm`,
 // `iTerm`, `Terminal`); unset ⇒ no app foregrounding (the tmux client still switches).
@@ -52,6 +75,11 @@ const TERM_APP = process.env.HERALD_TERM_APP
 // Labels the controller never manages (a blacklist). Empty by default.
 const RESERVED = new Set<string>([])
 const TICK_MS = 1000
+// How long to coalesce a burst of filesystem events from one save before waking the poll
+// loop early. Small enough that a `!` reveal reaches wezterm near-instantly, large enough to
+// fold an editor's write+rename into a single tick. `HERALD_WATCH_MS=0` disables the watcher
+// (falling back to pure TICK_MS polling).
+const WATCH_MS = process.env.HERALD_WATCH_MS !== undefined ? Number(process.env.HERALD_WATCH_MS) : 40
 // Grace period for a freshly launched claude to boot before we send its first prompt.
 const READY_MS = Number(process.env.HERALD_READY_MS) || 6000
 const DRY = process.argv.includes('--dry-run')
@@ -212,14 +240,14 @@ interface Prompt {
 	// deletes the line — the request is consumed, not left as clutter.
 	isShow: boolean
 	fired: boolean
-	// A `!` appended to this item — either to its status marker (`[NEEDS ATTENTION]!`)
-	// or directly to its own line (`: do the thing !`, `$ run me !`) — is a one-shot
-	// "reveal this item's window now" request, like `!` on a header. It fires once
-	// (`showNowFired`) and buildOps strips the `!`, consuming the request.
+	// A leading `!` on this item — on its own line (`!: do the thing`, `!$ run me`) or on its
+	// status marker line (`![NEEDS ATTENTION]`) — is a one-shot "reveal this item's window now"
+	// request, like a leading `!` on a header. It fires once (`showNowFired`) and buildOps strips
+	// the `!`, consuming the request.
 	showNow?: boolean
 	showNowFired?: boolean
 	// The `!` is on this item's own line (not its marker), so consuming it rewrites
-	// that line to `strippedLine` (the line without the trailing `!`).
+	// that line to `strippedLine` (the line without the `!`).
 	showNowInline?: boolean
 	strippedLine?: string
 }
@@ -241,14 +269,13 @@ interface Session {
 	prompts: Prompt[]
 	sessionMarker: { text: string; lineIdx: number } | null
 	desiredSession: string | null
-	// The header text with any trailing `!` stripped (what to rewrite the line to
-	// once a "show now" request is consumed).
+	// The header text (what to rewrite the line to once a "show now" request is consumed).
 	header: string
 	// The header line's leading whitespace: '' for a column-0 repo header, the tab run
 	// for an indented worktree label. buildOps prepends it when rewriting the line so a
 	// consumed worktree `!` keeps its indentation.
 	indent?: string
-	// A `!` suffix on the header ("show now"): switch the tmux client to this session
+	// A leading `!` on the header ("show now"): switch the tmux client to this session
 	// immediately, regardless of the queue. `showNowFired` is set the tick we act on
 	// it, so buildOps strips the `!` — a one-shot request.
 	showNow: boolean
@@ -297,9 +324,16 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 	// they sit under; a non-sigil line opens a new worktree container. Reset per header.
 	let containers: { indent: number; session: Session }[] = []
 	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]
+		let line = lines[i]
 		if (line.trim() === '') continue
 		const tabs = line.match(/^\t*/)?.[0] ?? ''
+		// A leading `!` on any line reveals that item's tmux pane (the shell for a `$command`, the
+		// claude pane otherwise) once, then is stripped. A bare `!` line stays shorthand for
+		// `show`, so only strip when content follows the `!`. Stripping it here lets every branch
+		// below parse the clean line and merely take its "show now" flag from `leadingBang`.
+		const afterTabs = line.slice(tabs.length)
+		const leadingBang = /^!\s*\S/.test(afterTabs)
+		if (leadingBang) line = tabs + afterTabs.replace(/^!\s*/, '')
 		if (tabs.length === 0) {
 			lastPrompt = null
 			// A column-0 `#` is a plain comment (it sits between sessions, so there is no
@@ -312,9 +346,9 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				continue
 			}
 			const raw = line.trim()
-			// A trailing `!` on the header means "show this session immediately".
-			const showNow = raw.endsWith('!')
-			const header = showNow ? raw.slice(0, -1).trimEnd() : raw
+			// A leading `!` on the header means "show this session immediately".
+			const showNow = leadingBang
+			const header = raw
 			const { label, dir } = resolveTarget(header, aliases)
 			const wtCfg = aliasWorktree(aliases[header])
 			cur = {
@@ -361,7 +395,8 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		const macroMatch = t.match(MACRO_RE)
 		if (macroMatch && macros[macroMatch[2]] !== undefined) {
 			// A `@name [args]` call: one item whose body expands in memory to `steps`. The
-			// file keeps this line; buildOps writes a single overall marker below it.
+			// file keeps this line; buildOps writes a single overall marker below it. A leading
+			// `!` (stripped above) reveals the macro's claude pane now, like on a plain prompt.
 			target.prompts.push({
 				text: t,
 				lineIdx: i,
@@ -377,19 +412,20 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				fired: false,
 				isMacro: true,
 				steps: macroSteps(macros[macroMatch[2]], macroMatch[3] ? macroArgs(macroMatch[3]) : []),
+				showNow: leadingBang || undefined,
+				showNowInline: leadingBang || undefined,
+				strippedLine: leadingBang ? tabs + t : undefined,
 			})
 		} else if (PROMPT_RE.test(t) || CMD_RE.test(t)) {
-			// A space-separated trailing `!` on a prompt or `$command` line means "reveal
-			// this item's window now" (the shell for a command, the claude pane
-			// otherwise), just like `!` on its marker. The space keeps ordinary end
-			// punctuation (`: ship it!`) as text; only `: ship it !` is a reveal. It's
+			// A leading `!` (stripped above) reveals this item's window now — the shell for a
+			// `$command`, the claude pane otherwise — like a leading `!` on its marker. It's
 			// stripped from the line once consumed.
 			const isCmd = CMD_RE.test(t)
 			const re = isCmd ? CMD_RE : PROMPT_RE
 			const m = t.match(re)!
 			const pane = paneFromSigil(m[1], m[2])
-			const bang = /\s!$/.test(t)
-			const body = bang ? t.slice(0, -1).trimEnd() : t
+			const bang = leadingBang
+			const body = t
 			const item: Prompt = {
 				text: body.replace(re, ''),
 				lineIdx: i,
@@ -443,10 +479,10 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				isShow: true,
 				fired: false,
 			})
-		} else if (/^\[.*\]!?$/.test(t)) {
-			// A trailing `!` on a marker means "reveal this item's window now".
-			const bang = t.endsWith('!')
-			const body = bang ? t.slice(0, -1).trimEnd() : t
+		} else if (/^\[.*\]$/.test(t)) {
+			// A leading `!` on a marker means "reveal this item's window now".
+			const bang = leadingBang
+			const body = t
 			const kind: Kind | null = /executing/i.test(body)
 				? 'EXECUTING'
 				: /attention/i.test(body)
@@ -474,11 +510,10 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		} else {
 			// A non-sigil indented line names a git worktree of its container's repo. It's a
 			// child session whose dir (<repo>/../<repo>-worktrees/<name>) is created on demand — only
-			// once it has queued work below it; an empty one is just an inert note. A trailing
-			// `!` means "show this worktree now", like on a repo header; it's stripped from the
-			// name (so the tmux label and dir stay clean) and consumed once acted on.
-			const showNow = t.endsWith('!')
-			const name = showNow ? t.slice(0, -1).trimEnd() : t
+			// once it has queued work below it; an empty one is just an inert note. A leading `!`
+			// means "show this worktree now", like on a repo header; it's stripped once acted on.
+			const showNow = leadingBang
+			const name = t
 			// The tmux label prefixes the container's label onto the worktree name (`app-4-feat`),
 			// so the worktree's session sorts next to its repo's `__app-4` in `tmux ls` and two
 			// same-named worktrees under different repos never collide. `-` keeps it safe as both
@@ -616,6 +651,17 @@ export function planCapture(s: Session, n: number, items: CaptureItem[]): { at: 
 	const executing = !head.isCmd
 	const lines = [...render(head), `${indent}\t${executing ? MARKER.EXECUTING : MARKER.DONE}`, ...rest.flatMap(render)]
 	return { at, lines, clear: frontier, executing }
+}
+
+// Shell commands typed while a lane's frontier is [NEEDS ATTENTION] are dropped, not captured:
+// the pane is paused waiting on the user, so a poke-around command isn't queue history, and
+// capturing it would steal the lane's one marker — flipping [NEEDS ATTENTION] to [DONE] and
+// hiding that the prompt still needs the user. Prompts still pass through (answering the prompt
+// legitimately resolves the attention). No-op when the frontier isn't [NEEDS ATTENTION].
+export function dropDuringAttention(s: Session, n: number, items: CaptureItem[]): CaptureItem[] {
+	const marked = s.prompts.filter((p) => p.pane === n && p.desiredKind !== null)
+	const frontier = marked.length ? marked.reduce((a, b) => (b.order < a.order ? b : a)) : null
+	return frontier?.desiredKind === 'ATTENTION' ? items.filter((it) => !it.isCmd) : items
 }
 
 // Merge the per-file session lists (in file order) into one logical session per label.
@@ -1024,7 +1070,7 @@ async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: n
 	await tm`tmux set-option -p -t ${created} @herald ${role}`
 	if (kind === 'claude') {
 		await sleep(300)
-		await typeInto(created, LAUNCH_CMD)
+		await typeInto(created, launchCmd())
 	}
 	return created
 }
@@ -1051,7 +1097,7 @@ async function doSpawn(label: string, dir: string) {
 	await tm`tmux set-option -p -t ${T(label)} @herald claude`
 	await makeShellWindow(label, dir)
 	await sleep(300)
-	await sendLine(label, LAUNCH_CMD)
+	await sendLine(label, launchCmd())
 	// The claude and shell panes have now inherited the herald identity at launch (the shell
 	// window sets its own via new-window -e), so strip it back out of the *session* env. A
 	// window the user opens later — e.g. an ad-hoc `claude` for a handoff — must NOT inherit
@@ -1179,6 +1225,24 @@ async function repairShell(label: string, dir: string, n = 1) {
 	await tm`tmux select-window -t ${await claudePane(label)}`
 }
 
+// Recreate lane `n`'s claude window so its Stop/Notification hook reports again — the claude
+// counterpart of repairShell. A tmux-resurrect restore brings the pane back as a bare shell
+// stripped of HERALD_LABEL/HERALD_PANE and the @herald tag (see taggedPane), so the hook
+// no-ops and the frontier prompt latches at [EXECUTING] forever with no Stop to advance it.
+// Re-tagging can't help — the restored process never inherited the env — so we kill the
+// stale window (its claude is already gone) and spawn a fresh, tagged one that relaunches
+// claude. The caller gates on the pane being idle, so a still-working (merely mis-tagged)
+// claude is never killed mid-turn. Leaves the new claude window focused.
+async function repairClaude(label: string, dir: string, n = 1) {
+	if (DRY) return
+	const tm = $({ nothrow: true, quiet: true })
+	const stale = await paneFor(label, 'claude', n)
+	log(`repairing ${T(label)} claude${n > 1 ? n : ''}: ${stale ? 'recreating restored window (restoring HERALD_LABEL)' : 'recreating missing window'}`)
+	if (stale) await tm`tmux kill-window -t ${stale}`
+	const created = await ensurePaneWindow(label, dir, 'claude', n)
+	await tm`tmux select-window -t ${created}`
+}
+
 async function doKill(label: string, switchTo: string | null) {
 	log(`killing ${T(label)}`)
 	if (DRY) return
@@ -1215,9 +1279,18 @@ async function showSession(label: string, window?: Window) {
 		if (pane) await tm`tmux select-window -t ${pane}`
 	}
 	const r = await tm`tmux list-clients -F ${'#{client_name}\t#{client_session}'}`
-	for (const line of r.stdout.split('\n')) {
-		const [client, session] = line.split('\t')
-		if (client && session?.startsWith(PREFIX)) {
+	const clients = r.stdout
+		.split('\n')
+		.map((line) => line.split('\t'))
+		.filter(([client]) => client)
+	// With a single attached client there's no ambiguity about which terminal is
+	// watching, so switch it even if it's parked on one of your own non-`__` sessions.
+	if (clients.length === 1) {
+		await tm`tmux switch-client -c ${clients[0][0]} -t ${T(label)}`
+		return
+	}
+	for (const [client, session] of clients) {
+		if (session?.startsWith(PREFIX)) {
 			await tm`tmux switch-client -c ${client} -t ${T(label)}`
 			return
 		}
@@ -1255,6 +1328,25 @@ function controlFiles(): string[] {
 				return false
 			}
 		})
+}
+
+// Watch the control dir (not each file — a directory watch survives atomicWrite's temp-file
+// rename, which swaps the inode a per-file watch would lose) and invoke `onChange` whenever a
+// `.herald` file is touched. Lets the poll loop react to a save — e.g. a `!` reveal — within
+// WATCH_MS instead of up to TICK_MS. Best-effort: if the watch can't be set up, the poll still
+// covers every change, just at TICK_MS granularity.
+function watchControls(onChange: () => void): void {
+	const dir = SINGLE_FILE ? dirname(SINGLE_FILE) : CONTROL_DIR
+	const only = SINGLE_FILE ? basename(SINGLE_FILE) : null
+	try {
+		watch(dir, (_event, filename) => {
+			if (!filename) return onChange() // some platforms omit the name; assume relevant
+			const name = filename.toString()
+			if (only ? name === only : name.endsWith(CONTROL_EXT)) onChange()
+		})
+	} catch {
+		// ignore — polling still handles it
+	}
 }
 
 // -------------------------------------------------------------- reconcile tick
@@ -1378,6 +1470,21 @@ const keepOnly = (s: Session, keep: Prompt | null) => {
 		if (p === keep) continue
 		if (p.desiredKind === 'EXECUTING' || p.desiredKind === 'DONE') p.desiredKind = null
 	}
+}
+
+// Rewind a lane's in-flight prompt so the next planQueue re-dispatches it from scratch: drop
+// its [EXECUTING]/[NEEDS ATTENTION] marker and zero the macro cursor + send timers. Used when
+// a de-tagged claude pane is recreated — the killed pane's conversation died with the restore,
+// so the frontier turn must run again. No-op (returns false) when nothing is in flight, so a
+// first-time lane spawn isn't disturbed.
+const resetLaneFrontier = (s: Session, n: number, lr: QueueRt): boolean => {
+	const active = s.prompts.filter((p) => p.pane === n && (p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION'))
+	if (!active.length) return false
+	for (const p of active) p.desiredKind = null
+	lr.macroStep = 0
+	lr.sentAt = 0
+	lr.cmdSentAt = 0
+	return true
 }
 
 // Decide the next transition for one (spawned, ready) session. Mutates the items'
@@ -1547,6 +1654,28 @@ async function tick(rt: Rt) {
 	const { sessions, labels: modelLabels } = mergeSessions(controls.map((c) => c.sessions))
 	const actions: (() => Promise<void>)[] = []
 
+	// ---- reveal pass: fire `!` "show now" requests up front ----
+	// A reveal just switches the tmux client to an item's pane — it needs no queue or pane-busy
+	// state — but the main session loop below awaits a `claudeBusy` (tmux capture-pane) per live
+	// lane before its own reveal action would run, so with several sessions a saved `!` could lag
+	// behind that whole serial sweep. Firing it here lands the reveal within the watch debounce
+	// instead. Only live sessions (the pane must exist); a `!` on a not-yet-spawned session still
+	// spawns via the main loop and reveals once it's up. `showNowFired` is set so buildOps strips
+	// the `!` at write time, consuming the request.
+	if (!DRY)
+		for (const s of sessions) {
+			if (RESERVED.has(s.label) || !live.has(s.label)) continue
+			if (s.showNow && !s.showNowFired) {
+				await showSession(s.label, frontierWindow(s))
+				s.showNowFired = true
+			}
+			for (const p of s.prompts) {
+				if (!p.showNow || p.showNowFired) continue
+				await showSession(s.label, windowOf(p))
+				p.showNowFired = true
+			}
+		}
+
 	// ---- capture pass: mirror manually-typed prompts/commands back into the files ----
 	// Read each live session's per-lane capture logs, drop herald's own sends, and stage the
 	// rest as the newest rows in the owning file. The inserts merge into the per-file rewrite
@@ -1604,7 +1733,7 @@ async function tick(rt: Rt) {
 				const lr = (rt[label].lanes[n] ??= { sentAt: 0, cmdSentAt: 0, prevPromptCount: 0, starting: false, startedAt: 0 })
 				const p = splitEcho(slot.prompts?.items ?? [], lr.pendingSent ?? [])
 				const c = splitEcho(slot.cmds?.items ?? [], lr.pendingSentCmd ?? [])
-				const items: CaptureItem[] = [...p.manual.map((t) => ({ text: t, isCmd: false })), ...c.manual.map((t) => ({ text: t, isCmd: true }))]
+				const items = dropDuringAttention(s, n, [...p.manual.map((t) => ({ text: t, isCmd: false })), ...c.manual.map((t) => ({ text: t, isCmd: true }))])
 				let liveSentAt: number | null = null
 				if (items.length) {
 					const plan = planCapture(s, n, items)
@@ -1675,20 +1804,8 @@ async function tick(rt: Rt) {
 			actions.push(() => doSpawn(label, dir))
 			continue
 		}
-		// A `!` "show now" header switches the client immediately (even mid-boot — the
-		// tmux session exists), independent of the queue; consumed by stripping the `!`.
-		if (s.showNow) {
-			actions.push(() => showSession(label, frontierWindow(s)))
-			s.showNowFired = true
-		}
-		// A `!` appended to an item's marker or its own line reveals that item's pane —
-		// the shell for a `$command`, the claude pane otherwise, in the item's lane.
-		for (const p of s.prompts) {
-			if (!p.showNow || p.showNowFired) continue
-			const window = windowOf(p)
-			actions.push(() => showSession(label, window))
-			p.showNowFired = true
-		}
+		// `!` "show now" reveals (header and per-item) fired up front in the reveal pass, so
+		// they land within the watch debounce rather than behind this loop's paneBusy sweep.
 		// Every session we see live for the first time is un-ready until it clears the
 		// grace below. A fresh spawn set this above (with a boot deadline); a reconnect
 		// or pre-existing session gets startedAt 0 so the boot grace is already satisfied.
@@ -1720,11 +1837,19 @@ async function tick(rt: Rt) {
 			// Ensure the panes this lane needs exist and can report completion, else create
 			// them and wait (skipped in --dry-run, where panes aren't real).
 			if (!DRY) {
-				// A `:N` lane needs its claude<N> window (n>1; claude1 came with the session).
-				if (n > 1 && laneHasClaude(s, n) && (await paneFor(label, 'claude', n)) === null) {
+				// The lane's claude pane must be *tagged* to report turn completion. Absent ⇒ a
+				// partial spawn (n>1; claude1 came with the session); untagged ⇒ a tmux-resurrect
+				// restore stripped HERALD_LABEL/HERALD_PANE and the tag, so its Stop hook no-ops and
+				// the frontier prompt hangs at [EXECUTING]. Recreate it (self-heal) before dispatching
+				// — but never kill a claude that's mid-turn (a live pane that merely lost its tag):
+				// wait it out. Only when the lane actually needs the pane (pending or stuck work), so
+				// a drained session's idle pane isn't churned.
+				if (laneHasClaude(s, n) && hasPendingInput(laneView(s, n)) && (await taggedPane(label, 'claude', n)) === null) {
+					if ((await claudeBusy(label, n)) === true) continue // working; don't kill it mid-turn
+					resetLaneFrontier(s, n, lr) // its prior turn died with the restore; run it again
 					lr.starting = true
 					lr.startedAt = Date.now()
-					actions.push(() => ensurePaneWindow(label, dir, 'claude', n).then(() => {}))
+					actions.push(() => repairClaude(label, dir, n))
 					continue
 				}
 				if (lr.starting && Date.now() - lr.startedAt < READY_MS) continue // let claude<N> boot
@@ -1885,8 +2010,36 @@ if (isMain)
 		}
 		acquireLock()
 		log(`herald watching ${SINGLE_FILE ?? `${CONTROL_DIR}/*${CONTROL_EXT}`} (${found.length} file(s))`)
+		// Between ticks, sleep TICK_MS — but a `.herald` edit wakes us early (after a short
+		// WATCH_MS debounce that folds an editor's write+rename into one tick), so a saved `!`
+		// reveal reaches wezterm in tens of ms rather than up to a second. The poll remains the
+		// backstop for state/hook files and tmux, and for platforms where the watch doesn't fire.
+		let wake: (() => void) | null = null
+		let dirtyBetweenTicks = false
+		let debounce: ReturnType<typeof setTimeout> | null = null
+		if (WATCH_MS > 0)
+			watchControls(() => {
+				if (debounce) return // already coalescing this burst
+				debounce = setTimeout(() => {
+					debounce = null
+					if (wake) wake()
+					else dirtyBetweenTicks = true // change landed mid-tick; the next wait resolves at once
+				}, WATCH_MS)
+			})
 		while (true) {
 			await tick(rt)
-			await sleep(TICK_MS)
+			await new Promise<void>((resolve) => {
+				if (dirtyBetweenTicks) {
+					dirtyBetweenTicks = false
+					return resolve()
+				}
+				const timer = setTimeout(done, TICK_MS)
+				function done() {
+					clearTimeout(timer)
+					wake = null
+					resolve()
+				}
+				wake = done
+			})
 		}
 	})
