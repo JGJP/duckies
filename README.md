@@ -240,6 +240,8 @@ moonbase-2
 | Delete all prompts under a session | Sends `/clear` (session stays alive, idle) |
 | Delete the session name | Kills the tmux session — and, for a worktree, `git worktree remove --force`s it too (uncommitted changes discarded) |
 | Answer a `[NEEDS ATTENTION]` prompt | Type directly into the tmux; the marker flips back to `[EXECUTING]` on submit, then `[DONE]` when Claude finishes |
+| Type a prompt straight into the claude pane | Mirrors it back into the file as a new `:` row (marked `[EXECUTING]` → `[DONE]`) — see below |
+| Run a command straight in the shell window | Mirrors it back into the file as a finished `$` row (`[DONE]`) — see below |
 
 Each spawned session has **two windows**: window `claude` (driven by the
 controller) and window `shell` (a free shell for you to run commands in). The
@@ -248,6 +250,31 @@ prompts always target it regardless of which window/pane is focused.
 
 Attach to a session with `tmux attach -t __<label>` (switch windows with your
 tmux prefix + `n`/`p`).
+
+### Capturing what you type
+
+The `.herald` file isn't one-way. When you type a prompt **directly** into a
+controlled `claude` pane, or run a command **directly** in its `shell` window,
+herald mirrors that back into the file so the session's log stays complete —
+whether the work came from the file or from your hands.
+
+- The row is added as the session's **newest** already-run/running item: inserted
+  just above the lane's frontier (its single marker), which moves onto your new
+  row — `[EXECUTING]` for a live prompt (then tracked to `[DONE]` like any prompt),
+  or `[DONE]` for a finished command. Anything already queued **above** the
+  frontier stays pending and resumes once your prompt finishes.
+- A command that finishes while a prompt is still `[EXECUTING]` (the two panes run
+  at once) is logged **below** that prompt without disturbing it.
+- herald knows its **own** sends (they fire the same hooks), so only input *you*
+  typed is captured — never the prompts/commands the controller dispatched.
+- Numbered lanes are preserved: typing into `claude2` writes a `:2` row, a command
+  in `shell2` writes a `$2` row.
+
+This relies on the shell command-completion hook (for `$` capture) and the
+`UserPromptSubmit` hook (for `:` capture) that `pnpm setup` installs. Prompt
+capture works immediately; command capture applies to shell windows started
+**after** re-running setup (existing panes keep the old hook until they re-source
+their rc / are recreated).
 
 ## Usage examples
 

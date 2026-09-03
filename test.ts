@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildOps, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planQueue, reapTargets } from './herald'
+import { aliasWorktree, applyOps, buildOps, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho } from './herald'
 import { merge3, nearestIndex, toLines } from './tui'
 
 let failures = 0
@@ -747,6 +747,66 @@ planQueue(xfMerged, xfRt, { now: 100, state: null, cmdDoneMtime: null }) // disp
 planQueue(xfMerged, xfRt, { now: 200, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null }) // B done → A runs
 check('frontier crosses to file A on B’s completion', applyOps(xfA.lines, buildOps(xfA.sessions)).join('\n') === 'shared\n\t: from A\n\t\t[EXECUTING]\n', applyOps(xfA.lines, buildOps(xfA.sessions)).join('\n'))
 check('file B’s marker is cleared as the frontier leaves it', applyOps(xfB.lines, buildOps(xfB.sessions)).join('\n') === 'shared\n\t: from B\n', applyOps(xfB.lines, buildOps(xfB.sessions)).join('\n'))
+
+// Capturing manually-typed input back into the file. A prompt typed into a live pane lands
+// just above the lane's frontier as the newest [EXECUTING] row; the previous frontier's
+// marker is cleared (it's now below the divider = already run). Mirrors how the controller
+// stages a capture: planCapture → clear the prior frontier → merge with buildOps.
+const capApply = (src: string, n: number, items: { text: string; isCmd: boolean }[]): string => {
+	const { lines, sessions } = parse(src)
+	const plan = planCapture(sessions[0], n, items)!
+	if (plan.clear) plan.clear.desiredKind = null
+	return applyOps(lines, [...buildOps(sessions), { pos: plan.at - 1, type: 'insert' as const, text: plan.lines.join('\n') }]).join('\n')
+}
+check(
+	'manual prompt lands above the frontier, taking its marker',
+	capApply('visa\n\t: old pending\n\t: done one\n\t\t[DONE]\n', 1, [{ text: 'my manual', isCmd: false }]) === 'visa\n\t: old pending\n\t: my manual\n\t\t[EXECUTING]\n\t: done one\n',
+	capApply('visa\n\t: old pending\n\t: done one\n\t\t[DONE]\n', 1, [{ text: 'my manual', isCmd: false }]),
+)
+check(
+	'manual command lands as a finished [DONE] row (fresh lane, appended at bottom)',
+	capApply('accounting\n\t: seed\n', 1, [{ text: 'sm .', isCmd: true }]) === 'accounting\n\t: seed\n\t$ sm .\n\t\t[DONE]\n',
+	capApply('accounting\n\t: seed\n', 1, [{ text: 'sm .', isCmd: true }]),
+)
+check(
+	'a multiline manual prompt uses `|` continuation lines',
+	capApply('repo\n\t: x\n\t\t[DONE]\n', 1, [{ text: 'line one\nline two\n\nline four', isCmd: false }]) ===
+		'repo\n\t: line one\n\t| line two\n\t|\n\t| line four\n\t\t[EXECUTING]\n\t: x\n',
+	capApply('repo\n\t: x\n\t\t[DONE]\n', 1, [{ text: 'line one\nline two\n\nline four', isCmd: false }]),
+)
+check(
+	'a numbered lane keeps its `:N`/`$N` sigil',
+	capApply('repo\n\t::2 seed\n\t\t[DONE]\n', 2, [{ text: 'hi', isCmd: false }]) === 'repo\n\t:2 hi\n\t\t[EXECUTING]\n\t::2 seed\n',
+	capApply('repo\n\t::2 seed\n\t\t[DONE]\n', 2, [{ text: 'hi', isCmd: false }]),
+)
+{
+	// The newest prompt in a batch keeps the [EXECUTING] marker; the earlier one drops below
+	// it, unmarked (already run). A command in the same batch is a finished [DONE] row.
+	const plan = planCapture(parse('repo\n\t: base\n\t\t[DONE]\n').sessions[0], 1, [
+		{ text: 'first', isCmd: false },
+		{ text: 'second', isCmd: false },
+	])!
+	check('newest prompt of a batch is [EXECUTING], older is unmarked below it', plan.lines.join('\n') === '\t: second\n\t\t[EXECUTING]\n\t: first', plan.lines.join('\n'))
+	check('a command-only batch marks the row [DONE], not [EXECUTING]', planCapture(parse('repo\n\t: base\n\t\t[DONE]\n').sessions[0], 1, [{ text: 'ls', isCmd: true }])!.executing === false)
+	check('an empty batch is a no-op', planCapture(parse('repo\n\t: base\n').sessions[0], 1, []) === null)
+}
+{
+	// A finished command captured while a prompt is still [EXECUTING] logs below that prompt
+	// without stealing its marker — the shell and claude panes run concurrently.
+	const out = capApply('repo\n\t: working\n\t\t[EXECUTING]\n', 1, [{ text: 'git status', isCmd: true }])
+	check('a command during a live prompt logs below it, leaving [EXECUTING] intact', out === 'repo\n\t: working\n\t\t[EXECUTING]\n\t$ git status\n', out)
+}
+
+{
+	// Claude Code resolves a sent slash command to its canonical `.scope` id, so the echo we
+	// capture won't string-match the short form we sent (a macro `: /cmd` step is the usual case).
+	check('scope-suffixed echo matches the short command we sent', slashEcho('/watch-pr-comments.shared', '/watch-pr-comments') === true)
+	check('identical slash commands still match', slashEcho('/ship', '/ship') === true)
+	check('scope-suffixed echo matches with identical args', slashEcho('/ship.shared feat', '/ship feat') === true)
+	check('a distinct command is not swallowed as a scope suffix', slashEcho('/cp', '/c') === false)
+	check('differing args do not match', slashEcho('/ship.shared a', '/ship b') === false)
+	check('non-slash text is left to exact matching', slashEcho('git status', 'git status') === false)
+}
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
 process.exit(failures === 0 ? 0 : 1)

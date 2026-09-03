@@ -13,4 +13,8 @@ function __herald_cmd_done --on-event fish_postexec
 	set -l suffix ""
 	test -n "$HERALD_PANE"; and set suffix ".$HERALD_PANE"
 	echo $st >"$dir/$HERALD_LABEL$suffix.cmd"
+	# Also mirror the command line into the lane's capture log so the controller can add
+	# manually-typed commands to the `.herald` file. It drops its own sends by matching the
+	# text, so logging herald's own `$command`s here is harmless. Skip a bare Enter.
+	test -n "$argv[1]"; and printf '%s\n' $argv[1] >>"$dir/$HERALD_LABEL$suffix.incmd"
 end

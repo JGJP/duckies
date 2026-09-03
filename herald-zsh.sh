@@ -9,7 +9,14 @@ if [ -n "$HERALD_SHELL" ] && [ -n "$HERALD_LABEL" ]; then
 		local dir="${HERALD_STATE:-$HOME/_dev/herald/state}"
 		# HERALD_PANE (set on numbered shells, `$2`/`$$` …) suffixes the done-file so each
 		# lane's shell reports independently; lane 1 (unset) keeps the bare `<label>.cmd`.
-		echo "$st" >"$dir/$HERALD_LABEL${HERALD_PANE:+.$HERALD_PANE}.cmd"
+		local suffix="${HERALD_PANE:+.$HERALD_PANE}"
+		echo "$st" >"$dir/$HERALD_LABEL$suffix.cmd"
+		# Also mirror the command line into the lane's capture log so the controller can add
+		# manually-typed commands to the `.herald` file (it drops its own sends by the text).
+		local cmd
+		cmd=$(fc -ln -1 2>/dev/null)
+		cmd="${cmd#"${cmd%%[![:space:]]*}"}" # ltrim leading whitespace/tab
+		[ -n "$cmd" ] && printf '%s\n' "$cmd" >>"$dir/$HERALD_LABEL$suffix.incmd"
 	}
 	# precmd runs before each prompt (i.e. after each command). Prepend ours so it
 	# captures $? before any other precmd hook can change it.

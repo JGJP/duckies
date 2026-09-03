@@ -535,6 +535,57 @@ export function applyOps(lines: string[], ops: Op[]): string[] {
 	return out
 }
 
+// ---------------------------------------------------- capture-to-file placement
+
+// A manually-typed item captured from a live pane: a claude prompt (isCmd false) or a shell
+// command (isCmd true), with herald's own sends already filtered out.
+export interface CaptureItem {
+	text: string
+	isCmd: boolean
+}
+// Place a batch of manually-typed items into lane `n` as its newest rows — a faithful log of
+// what just ran in the pane. The block is inserted just above the lane's frontier (its single
+// marker), and that one marker is handed to the block's newest item: [EXECUTING] if that's a
+// live claude prompt (the reconcile loop then tracks it to [DONE] like any prompt), else
+// [DONE] for a finished command. The previous frontier and the older rows in the block are
+// left unmarked — they now sit below the divider, i.e. already run. A multiline prompt is
+// written with `|` continuation lines. Returns the insert line index (place the block before
+// it), the block's lines, the prior frontier to clear, and whether the new marker is
+// [EXECUTING]. Null when there's nothing to place. Pure so it's unit-testable.
+export function planCapture(s: Session, n: number, items: CaptureItem[]): { at: number; lines: string[]; clear: Prompt | null; executing: boolean } | null {
+	if (!items.length) return null
+	const laneItems = s.prompts.filter((p) => p.pane === n)
+	const marked = laneItems.filter((p) => p.desiredKind !== null)
+	const frontier = marked.length ? marked.reduce((a, b) => (b.order < a.order ? b : a)) : null
+	const indent = frontier?.indent ?? laneItems[0]?.indent ?? `${s.indent ?? ''}\t`
+	const sig = n > 1 ? String(n) : ''
+	const render = (it: CaptureItem): string[] => {
+		if (it.isCmd) return [`${indent}$${sig} ${it.text}`]
+		const [first, ...more] = it.text.split('\n')
+		return [`${indent}:${sig} ${first}`, ...more.map((r) => `${indent}|${r === '' ? '' : ` ${r}`}`)]
+	}
+	const prompts = items.filter((it) => !it.isCmd)
+	// A finished command captured while a live prompt still holds the lane's [EXECUTING] marker
+	// (its claude turn is running in the other pane): log the command(s) as already-run rows just
+	// below that prompt, without stealing its marker — the shell and claude panes run at once, so
+	// the prompt must stay the tracked frontier.
+	if (!prompts.length && frontier?.desiredKind === 'EXECUTING') {
+		const at = (frontier.marker?.lineIdx ?? frontier.bodyEndIdx) + 1
+		return { at, lines: [...items].reverse().flatMap(render), clear: null, executing: false }
+	}
+	// Otherwise the block's newest item becomes the frontier and takes the lane's one marker:
+	// [EXECUTING] for a live prompt (preferred, so a claude turn is tracked), else [DONE] for a
+	// finished command. It's inserted just above the prior frontier (between it and the pending
+	// rows), or at the bottom of the block when nothing has run yet. The prior frontier and the
+	// older rows in the block are left unmarked — they now sit below the divider (already run).
+	const at = frontier ? frontier.lineIdx : s.lastChildIdx + 1
+	const head = prompts.length ? prompts[prompts.length - 1] : items[items.length - 1]
+	const rest = items.filter((it) => it !== head).reverse()
+	const executing = !head.isCmd
+	const lines = [...render(head), `${indent}\t${executing ? MARKER.EXECUTING : MARKER.DONE}`, ...rest.flatMap(render)]
+	return { at, lines, clear: frontier, executing }
+}
+
 // Merge the per-file session lists (in file order) into one logical session per label.
 // tmux labels are global, so a label that appears in several files (or twice in one) is
 // combined into ONE entry whose queue is every occurrence's rows concatenated in file
@@ -586,6 +637,11 @@ interface LaneRt {
 	// (n>1 only; lane 1's claude boots with the session, gated by RtEntry.starting).
 	starting: boolean
 	startedAt: number
+	// The last few prompts/commands this lane sent, kept so the capture pass can tell
+	// herald's own sends (which re-fire the same UserPromptSubmit/post-command hooks) from
+	// input a human typed straight into the pane. Each is matched-and-dropped once.
+	pendingSent?: string[]
+	pendingSentCmd?: string[]
 }
 // The subset planQueue itself touches — lets tests pass a plain object.
 type QueueRt = Pick<LaneRt, 'sentAt' | 'cmdSentAt' | 'prevPromptCount' | 'macroStep'>
@@ -651,11 +707,12 @@ const rmCmdDone = (label: string, n: number) => {
 		unlinkSync(cmdDonePath(label, n))
 	} catch {}
 }
-// Remove every lane's done-files for a label (session teardown), including numbered
-// panes, so a later reuse of the label doesn't read a stale completion.
+// Remove every lane's state files for a label (session teardown), including numbered
+// panes and the capture logs, so a later reuse of the label doesn't read stale input.
 const rmAllDoneFiles = (label: string) => {
+	const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.\\d+)?\\.(json|cmd|in|incmd)$`)
 	for (const f of readdirSync(STATE)) {
-		if (f === `${label}.json` || f === `${label}.cmd` || new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.\\d+\\.(json|cmd)$`).test(f)) {
+		if (re.test(f)) {
 			try {
 				unlinkSync(join(STATE, f))
 			} catch {}
@@ -668,6 +725,86 @@ const safeMtime = (p: string): number => {
 	} catch {
 		return -1
 	}
+}
+
+// -------------------------------------------------------- capturing pane input
+
+// Manually-typed input mirrored back into the `.herald` file. A live pane's hooks append
+// what the user types: the claude UserPromptSubmit hook writes each submitted prompt's raw
+// payload (one JSON object per line) to `<label>[.n].in`, and each shell's post-command
+// hook writes the command line to `<label>[.n].incmd`. Per lane, the controller drops its
+// own sends (they re-fire the same hooks) and stages the rest into the file.
+const inPath = (label: string, n: number) => join(STATE, `${label}${paneSuffix(n)}.in`)
+const incmdPath = (label: string, n: number) => join(STATE, `${label}${paneSuffix(n)}.incmd`)
+// The lanes/kinds with a pending capture log for this label (a `.in`/`.incmd` file each).
+function captureFiles(label: string): { n: number; kind: 'in' | 'incmd' }[] {
+	const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.(\\d+))?\\.(in|incmd)$`)
+	const out: { n: number; kind: 'in' | 'incmd' }[] = []
+	try {
+		for (const f of readdirSync(STATE)) {
+			const m = re.exec(f)
+			if (m) out.push({ n: m[1] ? parseInt(m[1], 10) : 1, kind: m[2] as 'in' | 'incmd' })
+		}
+	} catch {}
+	return out
+}
+// Read a capture log without consuming it: the parsed items, the byte length seen (so exactly
+// that prefix is truncated once the tick commits, leaving any concurrent append for next
+// tick), and the file's mtime (≈ the submit time, used to gate a captured prompt's Stop).
+// `.in` lines are the claude hook's JSON payloads (take `.prompt`); `.incmd` lines are raw
+// command lines. Null for a missing/empty log.
+function readCapture(path: string, kind: 'in' | 'incmd'): { items: string[]; len: number; mtime: number } | null {
+	let content: string
+	try {
+		content = readFileSync(path, 'utf8')
+	} catch {
+		return null
+	}
+	if (!content) return null
+	const items: string[] = []
+	for (const line of content.split('\n')) {
+		if (line.trim() === '') continue
+		if (kind === 'incmd') items.push(line)
+		else
+			try {
+				const p = JSON.parse(line).prompt
+				if (typeof p === 'string' && p !== '') items.push(p)
+			} catch {}
+	}
+	return { items, len: Buffer.byteLength(content, 'utf8'), mtime: safeMtime(path) }
+}
+// Drop the consumed prefix of a capture log once the tick commits its inserts. Appends only
+// grow the file, so anything past `len` (arrived mid-tick) is preserved for next tick.
+function truncateCapture(path: string, len: number) {
+	try {
+		const buf = readFileSync(path)
+		if (buf.length <= len) unlinkSync(path)
+		else writeFileSync(path, buf.subarray(len))
+	} catch {}
+}
+// Remember a prompt/command herald just dispatched into a lane, so its own hook echo isn't
+// mistaken for human input. Only the last few matter (they're matched off within a tick or
+// two); older entries are dropped to bound growth.
+const SENT_KEEP = 10
+const recordSent = (lr: LaneRt, isCmd: boolean, text: string) => {
+	const key = isCmd ? 'pendingSentCmd' : 'pendingSent'
+	lr[key] = [...(lr[key] ?? []), text].slice(-SENT_KEEP)
+}
+// Claude Code resolves a sent slash command to its canonical id — a `.scope` suffix on the
+// command token (e.g. `/watch-pr-comments` → `/watch-pr-comments.shared`) — so the
+// UserPromptSubmit echo doesn't string-match what we sent, and would be mirrored back into the
+// file as if a human typed it (notably for a macro's `: /cmd` step). Treat a captured prompt as
+// our echo when its command token is the sent token, optionally plus a `.scope` suffix, and any
+// args are identical. The `.` guard keeps `/c` from swallowing a distinct `/cp`.
+export const slashEcho = (captured: string, sent: string): boolean => {
+	if (!captured.startsWith('/') || !sent.startsWith('/')) return false
+	const ci = captured.indexOf(' ')
+	const si = sent.indexOf(' ')
+	const ct = ci < 0 ? captured : captured.slice(0, ci)
+	const st = si < 0 ? sent : sent.slice(0, si)
+	const cArgs = ci < 0 ? '' : captured.slice(ci + 1)
+	const sArgs = si < 0 ? '' : sent.slice(si + 1)
+	return cArgs === sArgs && (ct === st || ct.startsWith(`${st}.`))
 }
 
 // ------------------------------------------------------------------ tmux glue
@@ -838,15 +975,22 @@ async function doSpawn(label: string, dir: string) {
 	log(`spawning ${T(label)} in ${dir}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
-	// HERALD_LABEL/HERALD_STATE are set on the whole session (claude inherits them for
-	// its Stop/Notification hook); HERALD_SHELL marks only the shell window, where the
-	// per-shell hook writes command done-files (see herald-{fish,bash,zsh}.*).
+	// HERALD_LABEL/HERALD_STATE seed the session so its initial (claude) window inherits them
+	// for the Stop/Notification + prompt-capture hook; HERALD_SHELL marks only the shell window,
+	// where the per-shell hook writes command done-files (see herald-{fish,bash,zsh}.*).
 	await tm`tmux new-session -d -s ${T(label)} -n claude -c ${dir} -e ${`HERALD_LABEL=${label}`} -e ${`HERALD_STATE=${STATE}`}`
 	// Tag the claude pane, then open a second window as a free shell for the user.
 	await tm`tmux set-option -p -t ${T(label)} @herald claude`
 	await makeShellWindow(label, dir)
 	await sleep(300)
 	await sendLine(label, AGENT_CMD)
+	// The claude and shell panes have now inherited the herald identity at launch (the shell
+	// window sets its own via new-window -e), so strip it back out of the *session* env. A
+	// window the user opens later — e.g. an ad-hoc `claude` for a handoff — must NOT inherit
+	// HERALD_LABEL, or its hook would report to this lane: clobbering the real claude's status
+	// file and mirroring its prompts into the control file as if they were this lane's.
+	await tm`tmux set-environment -t ${T(label)} -u HERALD_LABEL`
+	await tm`tmux set-environment -t ${T(label)} -u HERALD_STATE`
 	// Leave the claude window focused so an attach shows it first.
 	await tm`tmux select-window -t ${await claudePane(label)}`
 	// The tmux steps above run with nothrow; a partial spawn leaves a half-formed
@@ -1304,6 +1448,94 @@ async function tick(rt: Rt) {
 	const { sessions, labels: modelLabels } = mergeSessions(controls.map((c) => c.sessions))
 	const actions: (() => Promise<void>)[] = []
 
+	// ---- capture pass: mirror manually-typed prompts/commands back into the files ----
+	// Read each live session's per-lane capture logs, drop herald's own sends, and stage the
+	// rest as the newest rows in the owning file. The inserts merge into the per-file rewrite
+	// below; the affected lanes skip dispatch this tick (their new [EXECUTING]/[DONE] row lands
+	// on the next parse). `commit` — advancing the send pools and consuming the logs — runs only
+	// once the tick has actually written (never on a mid-tick defer), so nothing is lost.
+	const captureOps = new Map<string, Op[]>()
+	const capturedLanes = new Set<string>()
+	const commit: (() => void)[] = []
+	// The control file that owns a row: the one whose parsed sessions hold the frontier prompt
+	// (markers are written back to the file a row came from), or — with nothing yet run — the
+	// one holding the session's primary part.
+	const ownerOf = (frontier: Prompt | null, base: Session): Control | null => {
+		if (frontier) {
+			for (const c of controls) for (const cs of c.sessions) if (cs.prompts.includes(frontier)) return c
+			return null
+		}
+		for (const c of controls) if (c.sessions.includes(base)) return c
+		return null
+	}
+	// Split a lane's raw captured lines into the ones herald sent (matched-and-removed from the
+	// send pool, once each) and the ones a human typed.
+	const splitEcho = (raw: string[], pool: string[]): { manual: string[]; matched: string[] } => {
+		const copy = [...pool]
+		const manual: string[] = []
+		const matched: string[] = []
+		for (const t of raw) {
+			// Exact first, then a slash-command whose canonical `.scope` echo we sent short.
+			let i = copy.indexOf(t)
+			if (i < 0) i = copy.findIndex((q) => slashEcho(t, q))
+			if (i >= 0) (matched.push(copy[i]), copy.splice(i, 1)) // record the sent text, so the pool drops it
+			else manual.push(t)
+		}
+		return { manual, matched }
+	}
+	if (!DRY)
+		for (const s of sessions) {
+			if (RESERVED.has(s.label) || !live.has(s.label)) continue
+			const label = s.label
+			const capFiles = captureFiles(label)
+			if (!capFiles.length) continue
+			rt[label] ??= { starting: true, startedAt: 0, lanes: {} }
+			rt[label].lanes ??= {}
+			// Group each lane's prompt (`.in`) and command (`.incmd`) logs together.
+			const byLane = new Map<number, { prompts?: ReturnType<typeof readCapture>; cmds?: ReturnType<typeof readCapture> }>()
+			for (const { n, kind } of capFiles) {
+				const cap = readCapture(kind === 'in' ? inPath(label, n) : incmdPath(label, n), kind)
+				if (!cap) continue
+				const slot = byLane.get(n) ?? {}
+				if (kind === 'in') slot.prompts = cap
+				else slot.cmds = cap
+				byLane.set(n, slot)
+			}
+			for (const [n, slot] of byLane) {
+				const lr = (rt[label].lanes[n] ??= { sentAt: 0, cmdSentAt: 0, prevPromptCount: 0, starting: false, startedAt: 0 })
+				const p = splitEcho(slot.prompts?.items ?? [], lr.pendingSent ?? [])
+				const c = splitEcho(slot.cmds?.items ?? [], lr.pendingSentCmd ?? [])
+				const items: CaptureItem[] = [...p.manual.map((t) => ({ text: t, isCmd: false })), ...c.manual.map((t) => ({ text: t, isCmd: true }))]
+				let liveSentAt: number | null = null
+				if (items.length) {
+					const plan = planCapture(s, n, items)
+					const owner = plan && ownerOf(plan.clear, s.parts?.[0] ?? s)
+					if (!plan || !owner) continue // can't place yet — leave logs and pools for next tick
+					if (plan.clear) plan.clear.desiredKind = null
+					const list = captureOps.get(owner.path) ?? []
+					list.push({ pos: plan.at - 1, type: 'insert', text: plan.lines.join('\n') })
+					captureOps.set(owner.path, list)
+					capturedLanes.add(`${label}:${n}`)
+					if (plan.executing) liveSentAt = slot.prompts?.mtime ?? Date.now()
+				}
+				commit.push(() => {
+					const drop = (key: 'pendingSent' | 'pendingSentCmd', matched: string[]) => {
+						const pool = [...(lr[key] ?? [])]
+						for (const t of matched) {
+							const i = pool.indexOf(t)
+							if (i >= 0) pool.splice(i, 1)
+						}
+						lr[key] = pool
+					}
+					drop('pendingSent', p.matched)
+					drop('pendingSentCmd', c.matched)
+					if (liveSentAt !== null) lr.sentAt = liveSentAt
+					if (slot.prompts) truncateCapture(inPath(label, n), slot.prompts.len)
+					if (slot.cmds) truncateCapture(incmdPath(label, n), slot.cmds.len)
+				})
+			}
+		}
+
 	for (const s of sessions) {
 		const label = s.label
 		if (RESERVED.has(label)) continue
@@ -1374,6 +1606,10 @@ async function tick(rt: Rt) {
 		for (const n of lanesOf(s)) {
 			re.lanes[n] ??= { sentAt: 0, cmdSentAt: 0, prevPromptCount: lanePromptCount(s, n), macroStep: 0, starting: false, startedAt: 0 }
 			const lr = re.lanes[n]
+			// This lane just captured manually-typed input into the file (staged above). Don't
+			// also dispatch this tick — the new row is already running in the pane; it's tracked
+			// from the next parse. Dispatching now would fire the pending queue into a busy pane.
+			if (capturedLanes.has(`${label}:${n}`)) continue
 			// Ensure the panes this lane needs exist and can report completion, else create
 			// them and wait (skipped in --dry-run, where panes aren't real).
 			if (!DRY) {
@@ -1407,9 +1643,12 @@ async function tick(rt: Rt) {
 			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state: readState(label, n), cmdDoneMtime, paneBusy })
 			if (hadActiveCmd && cmdDoneMtime !== null && cmdDoneMtime > cmdSentAtBefore) rmCmdDone(label, n)
 			for (const d of dispatches) {
-				if (d.type === 'prompt') actions.push(() => sendLine(label, d.text!, true, n))
-				else if (d.type === 'cmd') actions.push(() => sendCmd(label, d.text!, n))
-				else if (d.type === 'clear') actions.push(() => sendLine(label, '/clear', true, n))
+				// Record what we send so the capture pass can tell it from human input (our sends
+				// re-fire the same UserPromptSubmit/post-command hooks). Recorded as the action
+				// actually runs, so a deferred (unsent) dispatch leaves no phantom echo.
+				if (d.type === 'prompt') actions.push(() => (recordSent(lr, false, d.text!), sendLine(label, d.text!, true, n)))
+				else if (d.type === 'cmd') actions.push(() => (recordSent(lr, true, d.text!), sendCmd(label, d.text!, n)))
+				else if (d.type === 'clear') actions.push(() => (recordSent(lr, false, '/clear'), sendLine(label, '/clear', true, n)))
 				else if (d.type === 'show') actions.push(() => showSession(label, d.window))
 			}
 		}
@@ -1444,12 +1683,19 @@ async function tick(rt: Rt) {
 			return
 		}
 	}
-	// Rewrite each file in place — only the ones whose markers actually changed.
+	// Rewrite each file in place — only the ones whose markers actually changed. Capture
+	// inserts (manually-typed rows) merge with the marker ops; both index into the original
+	// lines, and applyOps orders them so the inserts and any marker deletes don't collide.
 	for (const c of controls) {
-		const newContent = applyOps(c.lines, buildOps(c.sessions)).join('\n')
+		const ops = [...buildOps(c.sessions), ...(captureOps.get(c.path) ?? [])]
+		const newContent = applyOps(c.lines, ops).join('\n')
 		if (newContent !== c.content) atomicWrite(c.path, newContent)
 	}
 	for (const a of actions) await a()
+	// Now that the tick has committed (past the defer point and the writes), advance the
+	// capture send-pools and consume the logs. On a mid-tick defer we return above, leaving
+	// the logs intact so the same input is re-read next tick — nothing is lost.
+	for (const fn of commit) fn()
 	saveRt(rt)
 }
 

@@ -9,4 +9,11 @@ mkdir -p "$dir"
 # HERALD_PANE (set on numbered claude panes, `:2`/`::` …) suffixes the state file so each
 # lane's claude reports independently; lane 1 (unset) keeps the bare `<label>.json`.
 suffix="${HERALD_PANE:+.$HERALD_PANE}"
-{ printf '{"event":"%s","raw":' "$1"; cat; printf '}\n'; } > "$dir/$HERALD_LABEL$suffix.json"
+input=$(cat)
+printf '{"event":"%s","raw":%s}\n' "$1" "$input" > "$dir/$HERALD_LABEL$suffix.json"
+# On a submitted prompt, also append the raw payload (one JSON object per line) to the lane's
+# capture log, so the controller can mirror manually-typed prompts back into the `.herald`
+# file. It filters out its own sends by the prompt text, so echoing our own prompts is fine.
+if [ "$1" = UserPromptSubmit ]; then
+	printf '%s\n' "$input" >> "$dir/$HERALD_LABEL$suffix.in"
+fi

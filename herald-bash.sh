@@ -9,7 +9,16 @@ if [ -n "$HERALD_SHELL" ] && [ -n "$HERALD_LABEL" ]; then
 		local dir="${HERALD_STATE:-$HOME/_dev/herald/state}"
 		# HERALD_PANE (set on numbered shells, `$2`/`$$` …) suffixes the done-file so each
 		# lane's shell reports independently; lane 1 (unset) keeps the bare `<label>.cmd`.
-		echo "$st" >"$dir/$HERALD_LABEL${HERALD_PANE:+.$HERALD_PANE}.cmd"
+		local suffix="${HERALD_PANE:+.$HERALD_PANE}"
+		echo "$st" >"$dir/$HERALD_LABEL$suffix.cmd"
+		# Also mirror the command line into the lane's capture log so the controller can add
+		# manually-typed commands to the `.herald` file (it drops its own sends by the text).
+		local cmd
+		cmd=$(HISTTIMEFORMAT= history 1)
+		cmd="${cmd#"${cmd%%[![:space:]]*}"}" # ltrim
+		cmd="${cmd#* }"                      # drop the leading history number
+		cmd="${cmd#"${cmd%%[![:space:]]*}"}" # ltrim what's left
+		[ -n "$cmd" ] && printf '%s\n' "$cmd" >>"$dir/$HERALD_LABEL$suffix.incmd"
 	}
 	# Prepend to PROMPT_COMMAND (runs after each command, before the next prompt) so
 	# our handler captures $? before anything else in PROMPT_COMMAND can clobber it.
