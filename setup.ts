@@ -15,7 +15,6 @@ const bashrcPath = resolve(homedir(), '.bashrc')
 const zshHookPath = resolve(here, 'herald-zsh.sh')
 const zshrcPath = resolve(homedir(), '.zshrc')
 const settingsPath = resolve(homedir(), '.claude', 'settings.json')
-const sublimeSyntaxPath = resolve(here, 'herald.sublime-syntax')
 // Sublime's `Packages/User` dir differs per OS. `HERALD_SUBLIME_DIR` overrides it.
 const sublimeUserDir = resolve(
 	process.env.HERALD_SUBLIME_DIR ??
@@ -25,7 +24,10 @@ const sublimeUserDir = resolve(
 				? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'Sublime Text', 'Packages', 'User')
 				: join(homedir(), '.config', 'sublime-text', 'Packages', 'User')),
 )
-const sublimeCopyPath = resolve(sublimeUserDir, 'herald.sublime-syntax')
+// The Sublime assets to install: the `.herald` syntax, its companion color scheme (which
+// carries the backgrounds a syntax scope can't set — the [EXECUTING] marker and macro calls),
+// and the syntax-specific settings (turns spell check off for these control files).
+const sublimeFiles = ['herald.sublime-syntax', 'herald.sublime-color-scheme', 'herald.sublime-settings']
 
 // Symlink the fish_postexec hook into fish's conf.d (fish auto-loads it). Repo
 // file stays the source of truth.
@@ -44,23 +46,27 @@ function installFishHook() {
 	console.log(`fish: linked hook ${fishLinkPath} -> ${fishHookPath}`)
 }
 
-// Copy the .herald syntax into Sublime's User package dir (Sublime auto-loads any
-// *.sublime-syntax there). Unlike the shell hooks we copy rather than symlink:
-// Sublime's package scanner doesn't follow symlinks, so a link is never loaded.
-// The repo file stays the source of truth — re-run setup to propagate edits.
-// Skips machines without a Sublime User dir.
+// Copy the .herald Sublime assets (syntax + color scheme) into Sublime's User package dir
+// (Sublime auto-loads any *.sublime-syntax / *.sublime-color-scheme there). Unlike the shell
+// hooks we copy rather than symlink: Sublime's package scanner doesn't follow symlinks, so a
+// link is never loaded. The repo files stay the source of truth — re-run setup to propagate
+// edits. Skips machines without a Sublime User dir.
 function installSublimeSyntax() {
 	if (!existsSync(sublimeUserDir)) {
 		console.log(`sublime: user dir not found (${sublimeUserDir}); skipping`)
 		return
 	}
-	const src = readFileSync(sublimeSyntaxPath)
-	if (existsSync(sublimeCopyPath) && readFileSync(sublimeCopyPath).equals(src)) {
-		console.log(`sublime: syntax already up to date (${sublimeCopyPath})`)
-		return
+	for (const name of sublimeFiles) {
+		const srcPath = resolve(here, name)
+		const dstPath = resolve(sublimeUserDir, name)
+		const src = readFileSync(srcPath)
+		if (existsSync(dstPath) && readFileSync(dstPath).equals(src)) {
+			console.log(`sublime: ${name} already up to date (${dstPath})`)
+			continue
+		}
+		copyFileSync(srcPath, dstPath)
+		console.log(`sublime: installed ${name} (${dstPath})`)
 	}
-	copyFileSync(sublimeSyntaxPath, sublimeCopyPath)
-	console.log(`sublime: installed syntax ${sublimeCopyPath}`)
 }
 
 // Idempotently source a shell hook from its rc file. Skips a shell whose rc file

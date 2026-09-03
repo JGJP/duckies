@@ -1,12 +1,18 @@
 {
 	// Merges into whatever color scheme is active (Sublime combines the `rules` of every
-	// .sublime-color-scheme in Packages/User). Forces macro calls to black on LINE green,
-	// which a syntax scope alone can't set a background for. Drop alongside herald.sublime-syntax.
+	// .sublime-color-scheme in Packages/User). Forces backgrounds a syntax scope alone can't
+	// set: macro calls to black on LINE green, and the [EXECUTING] marker to black on yellow so
+	// an active queue stands out at a glance. Drop alongside herald.sublime-syntax.
 	"rules": [
 		{
 			"scope": "entity.name.function.macro.herald",
 			"foreground": "#000000",
 			"background": "#06C755",
+		},
+		{
+			"scope": "constant.language.executing.herald",
+			"foreground": "#000000",
+			"background": "#FFFF00",
 		},
 	],
 }

@@ -1,0 +1,11 @@
+{
+	// Syntax-specific settings for `.herald` files (Sublime applies a `<syntax>.sublime-settings`
+	// to every file using that syntax — here the `herald` syntax). Spell check can't be turned
+	// off from the `.sublime-syntax` grammar itself; it's this setting plus `spelling_selector`.
+	//
+	// `.herald` files are terse control files, not prose — the only spell-checkable text is the
+	// `#` comment/note lines (prompts aren't a comment/string scope, so they're never checked).
+	// Those notes are URLs, names, and shorthand, so turn spell check off for the syntax to keep
+	// them squiggle-free.
+	"spell_check": false
+}
