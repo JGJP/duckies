@@ -137,7 +137,7 @@ moonbase-2
     `__moonbase`). Use this to point sessions anywhere on disk; or
   - a **bare name** → dir `~/_dev/<name>`, tmux session `__<name>`.
 
-  A trailing `!` on the header (e.g. `moonbase!`) means **show it now**: the
+  A leading `!` on the header (e.g. `!moonbase`) means **show it now**: the
   supervisor switches your attached tmux client to the session immediately —
   regardless of the queue — then strips the `!` (a one-shot request). The name/path
   resolves from the header without the `!`. This is the eager cousin of a queued
@@ -154,11 +154,12 @@ moonbase-2
   `[EXECUTING]`.
 - **One-line summary (`->`).** When a `:` prompt finishes, herald mirrors a one-line
   recap of the turn into the file just below the prompt, prefixed with `-> ` (at the
-  marker's indent). Every herald-launched Claude is asked — via an appended system prompt
-  at spawn — to end each turn with a `-> …` line; herald reads that line from the
-  transcript and writes it back, so the recap survives even after the `[DONE]` marker is
-  stripped as the frontier moves on. It's inert (never re-runs, isn't a worktree). No `-> `
-  line in Claude's reply ⇒ nothing is written.
+  marker's indent). Every herald-launched Claude is asked — via a combined system-prompt
+  file passed at spawn (`--append-system-prompt-file`, folding in your own base prompt from
+  `HERALD_SYSTEM_PROMPT_FILE` so it isn't clobbered) — to end each turn with a `-> …` line;
+  herald reads that line from the transcript and writes it back, so the recap survives even
+  after the `[DONE]` marker is stripped as the frontier moves on. It's inert (never re-runs,
+  isn't a worktree). No `-> ` line in Claude's reply ⇒ nothing is written.
 
   ```
   myrepo
@@ -203,7 +204,7 @@ moonbase-2
   has work: `git worktree add --detach` at `<repo>/../<repo>-worktrees/<name>` (a detached HEAD off
   the repo's current commit). Its tmux session is `__<repo>-<name>` (the repo's label
   prefixed onto the worktree name), so it sorts next to the repo's own `__<repo>` and two
-  same-named worktrees under different repos never clash. A trailing `!` on the line means
+  same-named worktrees under different repos never clash. A leading `!` on the line means
   "switch to it now", just like on a repo header. Removing the line tears the worktree down
   with its tmux session: the supervisor `git worktree remove --force`s it. Like the tmux kill
   this is unconditional — uncommitted or untracked changes in the worktree are discarded — so
@@ -253,8 +254,8 @@ moonbase-2
 | Number a sigil (`:2`/`::`, `$2`/`$$`, `#2`/`##`) | Routes the item to a parallel lane that runs concurrently — a 2nd Claude (`claude2`) / shell (`shell2`), created on demand |
 | Add an indented `#` line | Halts the drain there (a barrier / comment) until you delete it; a column-0 `#` is just a comment |
 | Add a `show` line | When the queue reaches it, switches your attached tmux client to this session, then deletes the line |
-| Add a `!` to a session header | Switches your attached tmux client to this session immediately (queue-independent), then strips the `!` |
-| Add a space-separated ` !` to any item line (or its marker) | Reveals that item's window immediately — the shell for a `$command`, the claude pane for a prompt — then strips the `!` |
+| Add a leading `!` to a session header | Switches your attached tmux client to this session immediately (queue-independent), then strips the `!` |
+| Add a leading `!` at the start of any item line (or its marker) | Reveals that item's window immediately — the shell for a `$command`, the claude pane for a prompt — then strips the `!` |
 | Delete all prompts under a session | Sends `/clear` (session stays alive, idle) |
 | Delete the session name | Kills the tmux session — and, for a worktree, `git worktree remove --force`s it too (uncommitted changes discarded) |
 | Answer a `[NEEDS ATTENTION]` prompt | Type directly into the tmux; the marker flips back to `[EXECUTING]` on submit, then `[DONE]` when Claude finishes |
@@ -350,7 +351,7 @@ moonbase
 
 Both `[EXECUTING]` markers are live simultaneously — one per lane. `::` ≡ `:2`,
 `:::` ≡ `:3`, `$$` ≡ `$2`, and so on. The `claude2`/`shell2` windows are created the
-first time a lane needs them. A trailing ` !` on any line reveals *that* lane's pane.
+first time a lane needs them. A leading `!` on any line reveals *that* lane's pane.
 
 ### Comment or block with `#`
 
@@ -386,27 +387,27 @@ moonbase
 		[DONE]
 ```
 
-A trailing `!` on the **header** instead switches **immediately**, regardless of
+A leading `!` on the **header** instead switches **immediately**, regardless of
 the queue, then strips itself — the "look at this one right now" button:
 
 ```
-moonbase!
+!moonbase
 	: something just broke — look now
 ```
 
-A space-separated trailing `!` on **any item line** reveals *that item's* window
+A leading `!` at the start of **any item line** reveals *that item's* window
 right away: the shell window for a `$command`, the claude pane for a prompt. The `!`
-strips itself once shown. The separating space keeps ordinary end punctuation as text
-(`: ship it!` stays text; `: ship it !` is a reveal):
+strips itself once shown, and reads well when you're pointing at a line
+(`!$ tail -f build.log`, `!moonbase`, `!feat`):
 
 ```
 moonbase
 	: crunch through the migration
-	$ tail -f build.log !
+	!$ tail -f build.log
 	: warm up the caches
 ```
 
-(The same `!` also works appended to an item's status marker, e.g. `[EXECUTING]!`.)
+(The same `!` also works at the start of an item's status marker, e.g. `![EXECUTING]`.)
 
 ### Clear a session without killing it
 

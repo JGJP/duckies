@@ -77,7 +77,7 @@ myrepo
 ## Sessions, worktrees, show
 
 - **Session header** (column 0): an alias from `herald-aliases.yaml`, a path, or a bare name
-  (→ `~/_dev/<name>`). A trailing `!` (`myrepo!`) switches your tmux client to it now.
+  (→ `~/_dev/<name>`). A leading `!` (`!myrepo`) switches your tmux client to it now.
 - **Worktree**: an indented line that *isn't* a sigil names a git worktree of the session's
   repo; items nested under it run there. If the base isn't a git repo, it's symlinked instead
   (runs on the original files). A worktree line with no children is inert.
