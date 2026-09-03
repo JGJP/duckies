@@ -828,5 +828,30 @@ check(
 	check('non-slash text is left to exact matching', slashEcho('git status', 'git status') === false)
 }
 
+// One-line `-> ` summaries mirrored below a finished prompt. parse treats a `-> …` line as an
+// inert note on the prompt above it (never a worktree); buildOps writes a pending desiredNote
+// just below the marker/body, once.
+{
+	const pr = parse('repo\n\t: do it\n\t\t[DONE]\n\t\t-> shipped the fix\n')
+	check('a `-> ` line is a note on the prompt, not a worktree', pr.sessions.length === 1 && pr.sessions[0].prompts[0].note?.text === 'shipped the fix')
+	check('an existing note round-trips unchanged', applyOps(pr.lines, buildOps(pr.sessions)).join('\n') === 'repo\n\t: do it\n\t\t[DONE]\n\t\t-> shipped the fix\n')
+
+	const noteApply = (src: string, summary: string, kind?: 'DONE' | null): string => {
+		const { lines, sessions } = parse(src)
+		const p = sessions[0].prompts[0]
+		if (kind !== undefined) p.desiredKind = kind
+		p.desiredNote = summary
+		return applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	check('a summary lands just below [DONE]', noteApply('repo\n\t: do it\n\t\t[DONE]\n', 'did the thing') === 'repo\n\t: do it\n\t\t[DONE]\n\t\t-> did the thing\n')
+	// idle completion: [EXECUTING] flips to [DONE] and the note lands below it, same tick.
+	check('a summary lands below a freshly-[DONE] frontier', noteApply('repo\n\t: task\n\t\t[EXECUTING]\n', 'ok', 'DONE') === 'repo\n\t: task\n\t\t[DONE]\n\t\t-> ok\n')
+	// next prompt dispatched the same tick strips this marker (keepOnly → desiredKind null); the
+	// note stays, now directly below the prompt body.
+	check('a summary survives the marker being stripped as the frontier moves', noteApply('repo\n\t: done one\n\t\t[EXECUTING]\n', 'summary', null) === 'repo\n\t: done one\n\t\t-> summary\n')
+	// idempotent: with a note already in the file, a pending desiredNote inserts nothing.
+	check('desiredNote is ignored when a note already exists', noteApply('repo\n\t: x\n\t\t[DONE]\n\t\t-> old\n', 'new') === 'repo\n\t: x\n\t\t[DONE]\n\t\t-> old\n')
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
 process.exit(failures === 0 ? 0 : 1)

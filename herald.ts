@@ -39,6 +39,12 @@ const DEV_DIR = process.env.HERALD_DEV_DIR ? resolve(process.env.HERALD_DEV_DIR)
 // The command typed into a fresh claude pane to launch the agent. `HERALD_AGENT_CMD`
 // overrides it (e.g. a wrapper script or a different agent CLI).
 const AGENT_CMD = process.env.HERALD_AGENT_CMD || 'claude'
+// Instruction appended to every herald-launched claude: end each turn with a one-line `-> `
+// summary, which the note pass mirrors into the `.herald` file below the finished prompt.
+// Skipped when HERALD_AGENT_CMD is a non-claude wrapper (the flag wouldn't exist).
+const NOTE_PROMPT =
+	'When you finish responding to a prompt in this session, end your final message with a single line beginning with -> that gives a concise one-line summary of what you did.'
+const LAUNCH_CMD = /(^|[\s/])claude(\s|$)/.test(AGENT_CMD) ? `${AGENT_CMD} --append-system-prompt '${NOTE_PROMPT}'` : AGENT_CMD
 // macOS only: the terminal app to bring to the foreground on a `show`/`!`, so a reveal
 // surfaces the window even under another app. Opt-in via `HERALD_TERM_APP` (e.g. `WezTerm`,
 // `iTerm`, `Terminal`); unset ⇒ no app foregrounding (the tmux client still switches).
@@ -176,6 +182,12 @@ interface Prompt {
 	indent: string
 	marker: { kind: Kind; lineIdx: number } | null
 	desiredKind: Kind | null
+	// A `-> <summary>` line already present below this prompt (a one-liner mirrored from the
+	// claude turn that finished it). Inert; kept so buildOps never re-adds it.
+	note?: { text: string; lineIdx: number } | null
+	// A summary to write below this prompt this tick (set by the note pass when the prompt
+	// completes). buildOps inserts it just below the marker/body when there's no `note` yet.
+	desiredNote?: string | null
 	// A `$command` line: runs once in the session's shell window, then is marked
 	// [DONE] like a finished prompt. It never enters the claude prompt queue.
 	isCmd: boolean
@@ -260,6 +272,10 @@ const BARRIER_RE = /^(#+)(\d*)\s*/
 // own indentation is preserved. The `|` and one optional following space are stripped; the
 // rest (incl. any further leading spaces) is the literal text. A bare `|` is a blank line.
 const CONT_RE = /^\|[ ]?/
+// A `-> ` line is a one-line summary herald mirrored below a finished prompt (see the note
+// pass): inert (never runs, no marker), attached to the prompt above it. Recognised here so a
+// non-sigil indented line isn't misread as a worktree. The `->` and one optional space strip.
+const NOTE_RE = /^->[ ]?/
 // A sigil run of length `run` (e.g. `::` → 2) or an explicit `digits` suffix (which
 // wins) picks the 1-based lane. `prompt:`/plain sigils fall through to lane 1.
 const paneFromSigil = (run: string | undefined, digits: string | undefined): number => (digits ? Math.max(1, parseInt(digits, 10) || 1) : run ? run.length : 1)
@@ -449,6 +465,12 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				target.sessionMarker = { text: body, lineIdx: i }
 				target.desiredSession = body
 			}
+		} else if (NOTE_RE.test(t)) {
+			// A `-> <summary>` line herald wrote below a finished prompt. Inert (no marker, never
+			// runs); attach it to the nearest preceding prompt so buildOps won't re-add it. It's
+			// caught here, before the worktree case, so the non-sigil line isn't read as a worktree.
+			const owner = [...target.prompts].reverse().find((p) => !p.isBarrier && !p.isShow)
+			if (owner) owner.note = { text: t.replace(NOTE_RE, ''), lineIdx: i }
 		} else {
 			// A non-sigil indented line names a git worktree of its container's repo. It's a
 			// child session whose dir (<repo>/../<repo>-worktrees/<name>) is created on demand — only
@@ -501,6 +523,11 @@ export function buildOps(sessions: Session[]): Op[] {
 			// A fired inline `!` sits on the item's own line, which the marker logic
 			// below never rewrites, so strip it here unconditionally.
 			if (p.showNowFired && p.showNowInline && p.strippedLine !== undefined) ops.push({ pos: p.lineIdx, type: 'replace', text: p.strippedLine })
+			// Mirror a one-line summary below the prompt, once. Anchored at the marker line so it
+			// lands just below [DONE] (or the body, if the marker was never written); a same-tick
+			// marker replace/delete stays above it, since applyOps orders an insert after ops at
+			// the same position. Skipped once the `-> ` line exists (idempotent).
+			if (p.desiredNote != null && !p.note) ops.push({ pos: p.marker ? p.marker.lineIdx : p.bodyEndIdx, type: 'insert', text: `${p.indent}\t-> ${p.desiredNote}` })
 			const cur = p.marker?.kind ?? null
 			if (cur === p.desiredKind) {
 				// A fired marker `!` ("reveal now") is consumed by stripping the `!`.
@@ -691,6 +718,42 @@ function readState(label: string, n: number): StateEvent | null {
 	} catch {
 		return null
 	}
+}
+// The `-> ` summary from the claude turn that just finished: follow the transcript path in
+// the lane's last hook payload, take the newest assistant message's text, and return its last
+// `-> …` line (the launch instruction asks claude to end each turn with one). Null when the
+// transcript is unreadable or has no such line — the note pass then writes nothing.
+function readAssistantNote(label: string, n: number): string | null {
+	let tpath: unknown
+	try {
+		tpath = JSON.parse(readFileSync(statePath(label, n), 'utf8')).raw?.transcript_path
+	} catch {
+		return null
+	}
+	if (typeof tpath !== 'string') return null
+	let content: string
+	try {
+		content = readFileSync(tpath, 'utf8')
+	} catch {
+		return null
+	}
+	let text = ''
+	for (const line of content.split('\n')) {
+		if (line.trim() === '') continue
+		try {
+			const o = JSON.parse(line)
+			if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
+				const parts = o.message.content.filter((c: { type?: string }) => c.type === 'text').map((c: { text?: string }) => c.text ?? '')
+				if (parts.length) text = parts.join('\n') // keep only the newest assistant message
+			}
+		} catch {}
+	}
+	const noteLine = text
+		.split('\n')
+		.map((l) => l.trim())
+		.reverse()
+		.find((l) => NOTE_RE.test(l))
+	return noteLine ? noteLine.replace(NOTE_RE, '').trim() || null : null
 }
 const rmState = (label: string, n: number) => {
 	try {
@@ -961,7 +1024,7 @@ async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: n
 	await tm`tmux set-option -p -t ${created} @herald ${role}`
 	if (kind === 'claude') {
 		await sleep(300)
-		await typeInto(created, AGENT_CMD)
+		await typeInto(created, LAUNCH_CMD)
 	}
 	return created
 }
@@ -988,7 +1051,7 @@ async function doSpawn(label: string, dir: string) {
 	await tm`tmux set-option -p -t ${T(label)} @herald claude`
 	await makeShellWindow(label, dir)
 	await sleep(300)
-	await sendLine(label, AGENT_CMD)
+	await sendLine(label, LAUNCH_CMD)
 	// The claude and shell panes have now inherited the herald identity at launch (the shell
 	// window sets its own via new-window -e), so strip it back out of the *session* env. A
 	// window the user opens later — e.g. an ad-hoc `claude` for a handoff — must NOT inherit
@@ -1684,7 +1747,22 @@ async function tick(rt: Rt) {
 			// have no claude pane). null (unreadable) ⇒ undefined so the planner falls back to
 			// pure hook-driven behavior rather than acting on a bad read.
 			const paneBusy = !DRY && laneHasClaude(s, n) ? ((await claudeBusy(label, n)) ?? undefined) : undefined
-			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state: readState(label, n), cmdDoneMtime, paneBusy })
+			const state = readState(label, n)
+			// A finished `:` prompt (fresh Stop, pane idle) gets a one-line `-> ` summary mirrored
+			// below it. Capture it now — before planQueue advances the queue and dispatches any next
+			// prompt at tick's end — so the transcript still reflects the turn that just ended. Same
+			// freshness/paneBusy gate planQueue uses to latch [DONE]; the `!p.note` guard makes it
+			// fire once (a lingering stale Stop is ignored after the line lands). Plain prompts only.
+			if (!DRY && state?.event === 'Stop' && state.mtimeMs > lr.sentAt && paneBusy !== true) {
+				const done = s.prompts.find(
+					(p) => p.pane === n && p.desiredKind === 'EXECUTING' && !p.isCmd && !p.isMacro && !p.isBarrier && !p.isShow && !p.note && p.text.trim() !== '/clear',
+				)
+				if (done) {
+					const summary = readAssistantNote(label, n)
+					if (summary) done.desiredNote = summary
+				}
+			}
+			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, paneBusy })
 			if (hadActiveCmd && cmdDoneMtime !== null && cmdDoneMtime > cmdSentAtBefore) rmCmdDone(label, n)
 			for (const d of dispatches) {
 				// Record what we send so the capture pass can tell it from human input (our sends

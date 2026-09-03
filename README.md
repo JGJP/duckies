@@ -152,6 +152,20 @@ moonbase-2
   event). `[NEEDS ATTENTION]` replaces the marker when Claude blocks waiting for
   input mid-task; answering it (submitting a prompt into the pane) flips it back to
   `[EXECUTING]`.
+- **One-line summary (`->`).** When a `:` prompt finishes, herald mirrors a one-line
+  recap of the turn into the file just below the prompt, prefixed with `-> ` (at the
+  marker's indent). Every herald-launched Claude is asked — via an appended system prompt
+  at spawn — to end each turn with a `-> …` line; herald reads that line from the
+  transcript and writes it back, so the recap survives even after the `[DONE]` marker is
+  stripped as the frontier moves on. It's inert (never re-runs, isn't a worktree). No `-> `
+  line in Claude's reply ⇒ nothing is written.
+
+  ```
+  myrepo
+  	: add a health-check endpoint and a test
+  		[DONE]
+  		-> added /healthz + a passing test
+  ```
 - **Multiline prompt.** Lines starting with `|` under a `prompt:`/`:` line are that
   prompt's **body** (YAML block-scalar style) — paste an error, a log, a spec and prefix
   each line with `|`; the whole block is sent as one multiline prompt (via bracketed paste,
