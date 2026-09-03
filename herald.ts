@@ -247,9 +247,12 @@ interface Prompt {
 	showNow?: boolean
 	showNowFired?: boolean
 	// The `!` is on this item's own line (not its marker), so consuming it rewrites
-	// that line to `strippedLine` (the line without the `!`).
+	// that line to `strippedLine` (the line without the `!`). For a `!` on a `|`
+	// multiline body line, `strippedLineIdx` points at that body line instead of the
+	// prompt's own `lineIdx`.
 	showNowInline?: boolean
 	strippedLine?: string
+	strippedLineIdx?: number
 }
 interface Session {
 	label: string
@@ -381,6 +384,15 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		if (lastPrompt && CONT_RE.test(t)) {
 			lastPrompt.text += `\n${t.replace(CONT_RE, '')}`
 			lastPrompt.bodyEndIdx = i
+			// A leading `!` on a `|` body line ("`!|`") reveals the parent prompt's window now,
+			// like a `!` on the prompt line itself. The `!` was stripped above, so we record the
+			// show-now request and point the strip-back at this body line (not the prompt line).
+			if (leadingBang) {
+				lastPrompt.showNow = true
+				lastPrompt.showNowInline = true
+				lastPrompt.strippedLine = tabs + t
+				lastPrompt.strippedLineIdx = i
+			}
 			continue
 		}
 		lastPrompt = null
@@ -557,7 +569,7 @@ export function buildOps(sessions: Session[]): Op[] {
 			}
 			// A fired inline `!` sits on the item's own line, which the marker logic
 			// below never rewrites, so strip it here unconditionally.
-			if (p.showNowFired && p.showNowInline && p.strippedLine !== undefined) ops.push({ pos: p.lineIdx, type: 'replace', text: p.strippedLine })
+			if (p.showNowFired && p.showNowInline && p.strippedLine !== undefined) ops.push({ pos: p.strippedLineIdx ?? p.lineIdx, type: 'replace', text: p.strippedLine })
 			// Mirror a one-line summary below the prompt, once. Anchored at the marker line so it
 			// lands just below [DONE] (or the body, if the marker was never written); a same-tick
 			// marker replace/delete stays above it, since applyOps orders an insert after ops at

@@ -133,6 +133,14 @@ check('a bare `!` line stays a show item, not a leading-bang', parse('alpha\n\t!
 // A trailing `!` is now ordinary text, never a reveal — only a leading `!` reveals.
 const punct = parse('alpha\n\t: ship it !\n')
 check('a trailing `!` is text, not a reveal', punct.sessions[0].prompts[0].showNow === undefined && punct.sessions[0].prompts[0].text === 'ship it !')
+// 4e. A leading `!` on a `|` multiline body line reveals the parent prompt's window, folds the
+// clean text into the body, and once fired strips the `!` from that body line only.
+const bangCont = 'alpha\n\t: fix this\n\t!| WARNING: bad\n'
+const bc = parse(bangCont)
+check('leading `!` on a `|` body line reveals the parent prompt', bc.sessions[0].prompts[0].showNow === true && bc.sessions[0].prompts[0].text === 'fix this\nWARNING: bad')
+check('an unfired `!|` round-trips verbatim', applyOps(bc.lines, buildOps(bc.sessions)).join('\n') === bangCont)
+bc.sessions[0].prompts[0].showNowFired = true
+check('a fired `!|` is stripped from the body line, not the prompt line', applyOps(bc.lines, buildOps(bc.sessions)).join('\n') === 'alpha\n\t: fix this\n\t| WARNING: bad\n')
 
 // 5. Minimal file with a single session.
 const single = 'alpha\n\tprompt: do a\n\tprompt: do b\n'
