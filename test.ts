@@ -513,6 +513,26 @@ check('a fired worktree `!` is stripped, keeping the indent', applyOps(wtBangPar
 // gate (which ORs showNow with hasPendingInput) will create + reveal it.
 check('a bare worktree `!` carries showNow even with no work', parse('repo\n\tfeat !\n').sessions.find((s) => s.worktreeBase)!.showNow === true)
 
+// A worktree whose base doesn't exist can't be created, so the tick stamps a session marker
+// ([NO DIR …]) that buildOps writes below the worktree's own block at the worktree's indent + 1
+// — attaching to the worktree, not the parent repo — and clears again (base appeared →
+// desiredSession null) by deleting that line.
+const wtErr = (() => {
+	const p = parse('repo\n\tfeat\n\t\t: do it\n')
+	p.sessions.find((s) => s.worktreeBase)!.desiredSession = '[NO DIR /r/repo]'
+	const marked = applyOps(p.lines, buildOps(p.sessions)).join('\n')
+	const rp = parse(marked)
+	const rfeat = rp.sessions.find((s) => s.worktreeBase)!
+	const repoMarker = rp.sessions.find((s) => s.label === 'repo')!.sessionMarker
+	rfeat.desiredSession = null
+	return { marked, attached: rfeat.sessionMarker?.text, repoMarker, cleared: applyOps(rp.lines, buildOps(rp.sessions)).join('\n') }
+})()
+check(
+	'a non-existent-base worktree gets a marker at its own indent, attaching to the worktree, and clears',
+	wtErr.marked === 'repo\n\tfeat\n\t\t: do it\n\t\t[NO DIR /r/repo]\n' && wtErr.attached === '[NO DIR /r/repo]' && wtErr.repoMarker === null && wtErr.cleared === 'repo\n\tfeat\n\t\t: do it\n',
+	JSON.stringify(wtErr),
+)
+
 // An explicit `: /clear` prompt clears the conversation without invoking the model,
 // so no Stop event ever arrives. It must still complete (a tick after dispatch) so the
 // drain continues, instead of hanging forever at [EXECUTING]. Note: state is null on

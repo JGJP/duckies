@@ -2,12 +2,14 @@
 import {
 	cpSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
 	rmdirSync,
 	statSync,
+	symlinkSync,
 	unlinkSync,
 	writeFileSync,
 } from 'node:fs'
@@ -337,6 +339,9 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		const d = tabs.length
 		while (containers.length > 1 && containers[containers.length - 1].indent >= d) containers.pop()
 		const target = containers[containers.length - 1].session
+		// Track the deepest container's last child too, so a worktree's session marker (e.g.
+		// [NO DIR …]) is inserted below the worktree's own block, not the repo's.
+		target.lastChildIdx = i
 		const macroMatch = t.match(MACRO_RE)
 		if (macroMatch && macros[macroMatch[2]] !== undefined) {
 			// A `@name [args]` call: one item whose body expands in memory to `steps`. The
@@ -516,9 +521,9 @@ export function buildOps(sessions: Session[]): Op[] {
 		if (cur === s.desiredSession) continue
 		if (s.sessionMarker) {
 			if (s.desiredSession === null) ops.push({ pos: s.sessionMarker.lineIdx, type: 'delete' })
-			else ops.push({ pos: s.sessionMarker.lineIdx, type: 'replace', text: `\t${s.desiredSession}` })
+			else ops.push({ pos: s.sessionMarker.lineIdx, type: 'replace', text: `${s.indent ?? ''}\t${s.desiredSession}` })
 		} else if (s.desiredSession !== null) {
-			ops.push({ pos: s.lastChildIdx, type: 'insert', text: `\t${s.desiredSession}` })
+			ops.push({ pos: s.lastChildIdx, type: 'insert', text: `${s.indent ?? ''}\t${s.desiredSession}` })
 		}
 	}
 	return ops
@@ -1040,19 +1045,50 @@ async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg
 	await doSpawn(label, dir)
 }
 
+// A labeled base that isn't a git repo can't be worktree'd, so instead point the same
+// `<base>-worktrees/<name>` path straight at the base with a symlink: the session runs in a
+// dir that *is* the base, so its commands modify the original files (no isolation — worktree
+// setup copy/cmd is skipped, there being no separate tree to seed). Torn down like a real
+// worktree, except removeWorktree just unlinks the symlink.
+async function linkDirAndSpawn(label: string, base: string, dir: string) {
+	log(`symlink ${dir} -> ${base}`)
+	if (DRY) return
+	await $({ nothrow: true, quiet: true })`mkdir -p ${dirname(dir)}`
+	try {
+		symlinkSync(base, dir)
+	} catch (e) {
+		log(`WARN symlink failed for ${T(label)}: ${(e as Error).message}`)
+		return
+	}
+	await doSpawn(label, dir)
+}
+
 // Delete the git worktree behind a torn-down session (its line was deleted from the control
 // file), so worktrees are cleaned up alongside their tmux session rather than piling up on
 // disk. Like the tmux kill it's unconditional: `--force` deletes even a dirty worktree
 // (uncommitted or untracked changes are discarded), matching "removing the line tears it all
 // down". Commit or move anything you want to keep before deleting the line.
 async function removeWorktree(label: string, base: string, dir: string) {
-	if (!existsSync(dir)) return
-	log(`worktree remove ${dir} (from ${base})`)
+	const link = lstatSync(dir, { throwIfNoEntry: false })
+	if (!link) return
 	if (DRY) return
-	const r = await $({ nothrow: true, quiet: true })`git -C ${base} worktree remove --force ${dir}`
-	if (r.exitCode !== 0) {
-		log(`WARN worktree remove failed for ${T(label)} (left on disk): ${r.stderr.trim()}`)
-		return
+	// A non-git base is symlinked, not worktree'd (see linkDirAndSpawn); just drop the link —
+	// git worktree remove would fail, and the base's files must be left untouched.
+	if (link.isSymbolicLink()) {
+		log(`symlink remove ${dir}`)
+		try {
+			unlinkSync(dir)
+		} catch (e) {
+			log(`WARN symlink remove failed for ${T(label)} (left on disk): ${(e as Error).message}`)
+			return
+		}
+	} else {
+		log(`worktree remove ${dir} (from ${base})`)
+		const r = await $({ nothrow: true, quiet: true })`git -C ${base} worktree remove --force ${dir}`
+		if (r.exitCode !== 0) {
+			log(`WARN worktree remove failed for ${T(label)} (left on disk): ${r.stderr.trim()}`)
+			return
+		}
 	}
 	// If that was the repo's last worktree, remove the now-empty `<repo>-worktrees` folder so
 	// it doesn't linger. Best-effort: skip (don't throw) if it's gone or not actually empty.
@@ -1542,17 +1578,25 @@ async function tick(rt: Rt) {
 		const dir = s.dir
 		if (!existsSync(dir)) {
 			// A worktree session's dir doesn't exist until we create it — and only once it has
-			// work (like any spawn). Its base repo must exist and be a git repo.
+			// work (like any spawn). A git base is worktree'd; a non-git base is symlinked so the
+			// session works directly on its files (see linkDirAndSpawn).
 			if (s.worktreeBase) {
 				if (!hasPendingInput(s) && !s.showNow) continue
-				if (!existsSync(join(s.worktreeBase, '.git'))) {
-					log(`worktree ${T(label)}: base ${s.worktreeBase} is not a git repo, skipping`)
+				const base = s.worktreeBase
+				if (!existsSync(base)) {
+					// Nothing to worktree or link to. Log once, then leave the marker (re-stamping the
+					// same text, once parsed back into desiredSession, is a no-op).
+					const marker = `[NO DIR ${base}]`
+					if (s.desiredSession !== marker) log(`worktree ${T(label)}: base ${base} does not exist, marking`)
+					s.desiredSession = marker
 					continue
 				}
-				rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, worktreeDir: dir, worktreeBase: s.worktreeBase }
-				const base = s.worktreeBase
-				const cfg = { cmd: s.worktreeCmd, copy: s.worktreeCopy }
-				actions.push(() => addWorktreeAndSpawn(label, base, dir, cfg))
+				s.desiredSession = null // clear any stale marker before creating
+				rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, worktreeDir: dir, worktreeBase: base }
+				if (existsSync(join(base, '.git'))) {
+					const cfg = { cmd: s.worktreeCmd, copy: s.worktreeCopy }
+					actions.push(() => addWorktreeAndSpawn(label, base, dir, cfg))
+				} else actions.push(() => linkDirAndSpawn(label, base, dir))
 				continue
 			}
 			s.desiredSession = `[NO DIR ${dir}]`

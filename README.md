@@ -195,6 +195,10 @@ moonbase-2
   this is unconditional — uncommitted or untracked changes in the worktree are discarded — so
   commit or move anything worth keeping first. Once a repo's last worktree goes, its now-empty
   `<repo>-worktrees` folder is removed too. A worktree line with no children is inert.
+  - If the base **isn't a git repo** (a plain labeled directory), it can't be worktree'd, so
+    the same `<base>-worktrees/<name>` path is instead a **symlink to the base** — the session
+    runs directly on the original files (no isolation; `worktree/copy`/`worktree/cmd` setup is
+    skipped). Removing the line just unlinks the symlink, leaving the base untouched.
 
   ```
   superapp
