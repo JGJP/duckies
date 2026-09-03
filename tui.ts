@@ -86,7 +86,7 @@ const C = {
 	done: '\x1b[38;5;114m',
 	attn: '\x1b[1;38;5;203m',
 	marker: '\x1b[38;5;203m',
-	bang: '\x1b[1;38;5;209m',
+	shownow: '\x1b[38;5;16;48;5;231m', // black on white — a leading-`!` "show now" line
 	gutter: '\x1b[38;5;240m',
 	gutterCur: '\x1b[38;5;250m',
 	status: '\x1b[7m',
@@ -113,11 +113,16 @@ function colorsFor(line: string): (string | null)[] {
 		fill(0, n, C.comment)
 		return col
 	}
+	// A leading `!` (at column 0 or right after the indent) is the "show now" mark — the only
+	// form of `!` herald recognises. The whole line reads as one accent, mirroring parse()'s
+	// leading-`!` handling and the grammars in the other editors.
+	if (afterIndent.startsWith('!')) {
+		fill(0, n, C.shownow)
+		return col
+	}
 	if (!line.startsWith('\t')) {
-		// column-0 session header; a trailing ` !` (or `!`) is the "show now" accent.
+		// column-0 session header.
 		fill(0, n, C.header)
-		const m = line.match(/(!)[ ]*$/)
-		if (m) fill(m.index!, m.index! + 1, C.bang)
 		return col
 	}
 	const body = line.slice(lead)
@@ -132,19 +137,16 @@ function colorsFor(line: string): (string | null)[] {
 	} else if ((m = body.match(/^\$+\d*/))) {
 		fill(lead, lead + m[0].length, C.cmdSigil)
 		fill(lead + m[0].length, n, C.cmdText)
-	} else if (/^(show|!)[ ]*$/i.test(body)) {
+	} else if (/^show[ ]*$/i.test(body)) {
 		fill(lead, n, C.show)
-	} else if ((m = body.match(/^(\[[^\]]*\])(!)?[ ]*$/))) {
+	} else if ((m = body.match(/^(\[[^\]]*\])[ ]*$/))) {
 		const inner = m[1].toLowerCase()
 		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : C.marker
 		fill(lead, lead + m[1].length, c)
-		if (m[2]) fill(lead + m[1].length, lead + m[1].length + 1, C.bang)
 	} else {
 		// A worktree name (indented non-sigil): a git worktree of the enclosing repo,
-		// styled like the repo header it stands in for, including its trailing `!` accent.
+		// styled like the repo header it stands in for.
 		fill(0, n, C.header)
-		const b = line.match(/(!)[ ]*$/)
-		if (b) fill(b.index!, b.index! + 1, C.bang)
 	}
 	return col
 }

@@ -14,6 +14,13 @@ file_extensions:
 
 contexts:
   main:
+    # Show-now line: any line whose first non-tab char is `!` reveals its pane/session now.
+    # Matched before every item rule so the whole line reads as one scope the color scheme
+    # flags (black on white), overriding the per-item coloring below — this is the only form
+    # of `!` herald recognises. A `!` anywhere else in a line is ordinary text.
+    - match: '^[ \t]*!.*$'
+      scope: markup.other.shownow.herald
+
     # Comment: any row starting with `#` (at any indent, incl. column 0) is ignored.
     - match: '^[ \t]*((#)[^\n]*)$'
       captures:
@@ -29,7 +36,8 @@ contexts:
 
     # Prompt: `prompt:` or the `:` shorthand. A run of colons or a trailing number
     # (`::`/`:2`) selects the lane/pane. The whole line is one prompt scope (sigil +
-    # text) so it can be styled as a single unit.
+    # text) so it can be styled as a single unit. A leading `!` reveals this item's pane
+    # now, handled by the show-now rule above.
     - match: '^\t+[ ]*((?i:prompt)?:+\d*)'
       captures:
         1: keyword.control.prompt.herald
@@ -47,7 +55,8 @@ contexts:
         2: meta.prompt.herald
 
     # Command: `$` sigil runs in the shell window; `$$`/`$2` target lane 2, etc. Sigil
-    # and text share a contiguous region so a background color has no gaps.
+    # and text share a contiguous region so a background color has no gaps. A leading `!`
+    # reveals the shell window now, handled by the show-now rule above.
     - match: '^\t+[ ]*(\$+\d*)(.*)$'
       captures:
         1: keyword.operator.command.herald
@@ -60,37 +69,39 @@ contexts:
 
     # Status markers (controller-written). Each state gets its own scope so the
     # queue reads like a traffic light: executing = active, done = success,
-    # attention / session-error = alarm. A trailing `!` means "reveal now".
-    - match: '^\t+[ ]*((?i:\[[^\]]*executing[^\]]*\]))(!)?[ ]*$'
+    # attention / session-error = alarm. A leading `!` ("reveal now") is handled by the
+    # show-now rule above.
+    - match: '^\t+[ ]*((?i:\[[^\]]*executing[^\]]*\]))[ ]*$'
       captures:
         1: constant.language.executing.herald
-        2: keyword.operator.show-now.herald
-    - match: '^\t+[ ]*((?i:\[[^\]]*done[^\]]*\]))(!)?[ ]*$'
+    - match: '^\t+[ ]*((?i:\[[^\]]*done[^\]]*\]))[ ]*$'
       captures:
         1: markup.inserted.done.herald
-        2: keyword.operator.show-now.herald
-    - match: '^\t+[ ]*((?i:\[[^\]]*attention[^\]]*\]))(!)?[ ]*$'
+    - match: '^\t+[ ]*((?i:\[[^\]]*attention[^\]]*\]))[ ]*$'
       captures:
         1: invalid.deprecated.attention.herald
-        2: keyword.operator.show-now.herald
     # Anything else in brackets (e.g. [NO DIR …], [DUPLICATE]) is a session marker.
-    - match: '^\t+[ ]*(\[[^\n]*\])(!)?[ ]*$'
+    - match: '^\t+[ ]*(\[[^\n]*\])[ ]*$'
       captures:
         1: invalid.illegal.marker.herald
-        2: keyword.operator.show-now.herald
+
+    # Note: a `-> …` line herald mirrors below a finished prompt — an inert one-line summary
+    # of the turn (see the note pass in parse()/buildOps). Matched before the worktree fallback
+    # so the non-sigil line isn't read as a worktree label. The whole line gets one scope so the
+    # color scheme can render it yellow (see herald.sublime-color-scheme).
+    - match: '^\t+[ ]*->.*$'
+      scope: markup.other.note.herald
 
     # Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing
     # repo). It matches none of the rules above, mirroring parse()'s fallback branch, and
     # reads as a class name — the same scope as the repo header it stands in for. A
-    # trailing `!` ("show now") gets the same accent as on a repo header.
-    - match: '^\t+[ ]*(\S[^\n]*?)[ ]*(!?)[ ]*$'
+    # leading `!` ("show now") is handled by the show-now rule above.
+    - match: '^\t+[ ]*(\S[^\n]*?)[ ]*$'
       captures:
         1: entity.name.class.herald
-        2: keyword.control.show-now.herald
 
-    # Session header: a column-0 line (no leading tab). A trailing `!` means
-    # "switch to this session now".
-    - match: '^(?![\t\n])([^\n]*?)[ ]*(!?)[ ]*$'
+    # Session header: a column-0 line (no leading tab). A leading `!` means "switch to
+    # this session now", handled by the show-now rule above.
+    - match: '^(?![\t\n])[ ]*([^\n]*?)[ ]*$'
       captures:
         1: entity.name.class.herald
-        2: keyword.control.show-now.herald

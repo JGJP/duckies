@@ -12,7 +12,16 @@
 		{
 			"scope": "constant.language.executing.herald",
 			"foreground": "#000000",
-			"background": "#FFFF00",
+			"background": "hsl(25, 100%, 55%)",
+		},
+		{
+			"scope": "markup.other.note.herald",
+			"foreground": "hsl(25, 100%, 55%)",
+		},
+		{
+			"scope": "markup.other.shownow.herald",
+			"foreground": "#000000",
+			"background": "#FFFFFF",
 		},
 	],
 }

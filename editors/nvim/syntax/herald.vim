@@ -14,14 +14,19 @@ syntax match heraldComment /^\s*#.*$/
 " must follow the `@`, so a `@@@…` body line never matches.
 syntax match heraldMacro /^\s*@[0-9A-Za-z_-]\+\%(\s.*\)\?$/
 
-" Session header: a column-0 (non-tab, non-`#`) line. A trailing `!` = "show it now".
-syntax match heraldHeader /^[^\t#].*$/ contains=heraldBang
+" Session header: a column-0 (non-tab, non-`#`) line. A leading `!` = "show it now"
+" (matched by heraldShowNow below).
+syntax match heraldHeader /^[^\t#].*$/
+
+" Note: a `-> …` line herald mirrors below a finished prompt (an inert one-line summary of
+" the turn). Shown in yellow across the whole line (see the highlight below).
+syntax match heraldNote /^\t\+ *->.*$/
 
 " Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing repo).
 " Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
-" show/marker rows so only true labels match. Styled like a header (Identifier), and a
-" trailing `!` ("show now") gets the same accent.
-syntax match heraldWorktree /\c^\t\+ *\%([#@:$[|]\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/ contains=heraldBang
+" show/marker/note rows so only true labels match. Styled like a header (Identifier); a
+" leading `!` ("show now") is matched by heraldShowNow below.
+syntax match heraldWorktree /\c^\t\+ *\%([#@:$[|]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
 
 " Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane. Only the sigil is
 " highlighted (\zs starts the match after the indent); the text stays normal.
@@ -39,11 +44,12 @@ syntax match heraldContSigil /^\t\+ *\zs|/
 syntax match heraldShow /^\t\+ *\c\%(show\|!\)\s*$/
 
 " Status markers (controller-written): [EXECUTING] [DONE] [NEEDS ATTENTION] [NO DIR …] …
-" A trailing `!` means "reveal now".
-syntax match heraldStatus /^\t\+ *\[[^\]]*\]!\=\s*$/ contains=heraldBang
+syntax match heraldStatus /^\t\+ *\[[^\]]*\]\s*$/
 
-" A trailing `!` reveal/show-now marker, highlighted within a header or status line.
-syntax match heraldBang /!/ contained
+" Show-now line: any line whose first non-tab char is `!` reveals its pane/session now. The
+" whole line is flagged black-on-white, overriding the per-item rules above. Defined last so
+" it wins over the same-length header/worktree/show matches it overlaps.
+syntax match heraldShowNow /^\s*!.*$/
 
 highlight default link heraldComment      Comment
 highlight default link heraldHeader       Identifier
@@ -53,9 +59,12 @@ highlight default link heraldContSigil    Statement
 highlight default link heraldCommandSigil Operator
 highlight default link heraldCommandText  String
 highlight default link heraldShow         Keyword
-highlight default link heraldBang         Special
+" Orange across the whole line, matching the Sublime setup; `default` so a colorscheme can override.
+highlight default heraldNote guifg=#FF791A ctermfg=208
 " White on red, matching the Sublime setup; `default` so a colorscheme can override.
 highlight default heraldStatus guifg=#ffffff guibg=#dc0404 ctermfg=15 ctermbg=196
+" Black on white for a leading-`!` show-now line; `default` so a colorscheme can override.
+highlight default heraldShowNow guifg=#000000 guibg=#ffffff ctermfg=0 ctermbg=15
 " Macro calls: black on LINE green (#06C755); `default` so a colorscheme can override.
 highlight default heraldMacro guifg=#000000 guibg=#06c755 ctermfg=black ctermbg=41
 

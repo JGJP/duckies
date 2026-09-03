@@ -30,6 +30,20 @@
 				"scopeName": "source.herald",
 				"path": "./syntaxes/herald.tmLanguage.json"
 			}
-		]
+		],
+		"configurationDefaults": {
+			"editor.tokenColorCustomizations": {
+				"textMateRules": [
+					{
+						"scope": "markup.other.note.herald",
+						"settings": { "foreground": "#FF791A" }
+					},
+					{
+						"scope": "markup.other.shownow.herald",
+						"settings": { "foreground": "#000000", "background": "#FFFFFF" }
+					}
+				]
+			}
+		}
 	}
 }
