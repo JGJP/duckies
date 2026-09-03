@@ -26,8 +26,10 @@ const sublimeUserDir = resolve(
 )
 // The Sublime assets to install: the `.herald` syntax, its companion color scheme (which
 // carries the backgrounds a syntax scope can't set — the [EXECUTING] marker and macro calls),
-// and the syntax-specific settings (turns spell check off for these control files).
-const sublimeFiles = ['herald.sublime-syntax', 'herald.sublime-color-scheme', 'herald.sublime-settings']
+// the syntax-specific settings (turns spell check off for these control files), the reveal
+// plugin (adds a `!` to the current line and saves — a one-click "show this pane now"), and
+// its command-palette entry.
+const sublimeFiles = ['herald.sublime-syntax', 'herald.sublime-color-scheme', 'herald.sublime-settings', 'herald_reveal.py', 'herald.sublime-commands']
 
 // Symlink the fish_postexec hook into fish's conf.d (fish auto-loads it). Repo
 // file stays the source of truth.

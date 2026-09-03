@@ -1,0 +1,6 @@
+[
+	{
+		"caption": "Herald: Reveal this line's pane (add ! and save)",
+		"command": "herald_reveal"
+	}
+]
