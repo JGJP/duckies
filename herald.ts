@@ -1272,10 +1272,12 @@ async function doKill(label: string, switchTo: string | null) {
 	await tm`tmux kill-session -t ${T(label)}`
 }
 
-// Bring this session on screen by switching the first client that's currently
-// viewing a controller-managed (`__*`) session — i.e. the terminal you use to watch
-// herald sessions (e.g. WezTerm). Clients parked on your own non-`__` sessions are
-// left alone. Run outside tmux there is no "current" client, so we target it by name.
+// Bring this session on screen by switching the terminal you're watching to it. With
+// several terminals attached (each a separate tmux client), we can't know which one your
+// eyes are on, so we switch the most-recently-active client — the one you last interacted
+// with. Only clients parked on a controller-managed (`__*`) session are eligible, so a
+// reveal never yanks a terminal you've parked on your own unrelated (non-`__`) work.
+// Run outside tmux there is no "current" client, so we target it by name.
 async function showSession(label: string, window?: Window) {
 	log(`showing ${T(label)}${window ? ` (${paneRole(window.kind, window.n)})` : ''}`)
 	if (DRY) return
@@ -1290,7 +1292,7 @@ async function showSession(label: string, window?: Window) {
 		const pane = await paneFor(label, window.kind, window.n)
 		if (pane) await tm`tmux select-window -t ${pane}`
 	}
-	const r = await tm`tmux list-clients -F ${'#{client_name}\t#{client_session}'}`
+	const r = await tm`tmux list-clients -F ${'#{client_name}\t#{client_session}\t#{client_activity}'}`
 	const clients = r.stdout
 		.split('\n')
 		.map((line) => line.split('\t'))
@@ -1301,12 +1303,10 @@ async function showSession(label: string, window?: Window) {
 		await tm`tmux switch-client -c ${clients[0][0]} -t ${T(label)}`
 		return
 	}
-	for (const [client, session] of clients) {
-		if (session?.startsWith(PREFIX)) {
-			await tm`tmux switch-client -c ${client} -t ${T(label)}`
-			return
-		}
-	}
+	// Several terminals attached: switch the most-recently-active one parked on a `__*`
+	// session — the terminal you last touched — so the reveal lands where you're looking.
+	const watching = clients.filter(([, session]) => session?.startsWith(PREFIX)).sort(([, , a], [, , b]) => Number(b) - Number(a))
+	if (watching.length) await tm`tmux switch-client -c ${watching[0][0]} -t ${T(label)}`
 }
 
 const atomicWrite = (path: string, content: string) => {
