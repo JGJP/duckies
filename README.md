@@ -255,7 +255,7 @@ moonbase-2
 | Add an indented `#` line | Halts the drain there (a barrier / comment) until you delete it; a column-0 `#` is just a comment |
 | Add a `show` line | When the queue reaches it, switches your attached tmux client to this session, then deletes the line |
 | Add a leading `!` to a session header | Switches your attached tmux client to this session immediately (queue-independent), then strips the `!` |
-| Add a leading `!` at the start of any item line (or its marker) | Reveals that item's window immediately — the shell for a `$command`, the claude pane for a prompt — then strips the `!` |
+| Add a leading `!` at the start of any item line (or its marker, or a `|` body line → the parent prompt) | Reveals that item's window immediately — the shell for a `$command`, the claude pane for a prompt — then strips the `!` |
 | Delete all prompts under a session | Sends `/clear` (session stays alive, idle) |
 | Delete the session name | Kills the tmux session — and, for a worktree, `git worktree remove --force`s it too (uncommitted changes discarded) |
 | Answer a `[NEEDS ATTENTION]` prompt | Type directly into the tmux; the marker flips back to `[EXECUTING]` on submit, then `[DONE]` when Claude finishes |
@@ -407,7 +407,8 @@ moonbase
 	: warm up the caches
 ```
 
-(The same `!` also works at the start of an item's status marker, e.g. `![EXECUTING]`.)
+(The same `!` also works at the start of an item's status marker, e.g. `![EXECUTING]`, and
+at the start of a `|` multiline body line — `!| …` reveals the **parent prompt's** pane.)
 
 ### Clear a session without killing it
 
@@ -481,7 +482,10 @@ that matches `herald-aliases.yaml` uses the mapped path. See the aliases section
   `herald.sublime-color-scheme`, rename it to match your active color scheme (e.g.
   `Mariana.sublime-color-scheme`), and place it where Sublime will merge it — in
   `Packages/User` if your scheme is built-in, or in its own package folder (e.g.
-  `Packages/herald/`) if your scheme itself lives in `Packages/User`.
+  `Packages/herald/`) if your scheme itself lives in `Packages/User`. `pnpm setup` also
+  installs a **reveal plugin** (`herald_reveal.py` + `herald.sublime-commands`): run
+  *"Herald: Reveal this line's pane"* from the command palette to add a leading `!` to the
+  current line and save — one click to bring that item's pane on screen.
 - **Neovim / Vim** — `editors/nvim/` (`syntax` + `ftdetect` + `ftplugin`). Symlink or
   copy the three `herald.vim` files into the matching dirs under `~/.config/nvim/`;
   filetype detection and highlighting then load automatically. Status markers render
