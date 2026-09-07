@@ -19,14 +19,14 @@ syntax match heraldMacro /^\s*@[0-9A-Za-z_-]\+\%(\s.*\)\?$/
 syntax match heraldHeader /^[^\t#].*$/
 
 " Note: a `-> …` line herald mirrors below a finished prompt (an inert one-line summary of
-" the turn). Shown in yellow across the whole line (see the highlight below).
+" the turn). Linked to Comment so it reads like the `#` rows (see the highlight below).
 syntax match heraldNote /^\t\+ *->.*$/
 
 " Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing repo).
 " Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
 " show/marker/note rows so only true labels match. Styled like a header (Identifier); a
 " leading `!` ("show now") is matched by heraldShowNow below.
-syntax match heraldWorktree /\c^\t\+ *\%([#@:$[|]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
+syntax match heraldWorktree /\c^\t\+ *\%([#@:$[|%]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
 
 " Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane. Only the sigil is
 " highlighted (\zs starts the match after the indent); the text stays normal.
@@ -43,8 +43,15 @@ syntax match heraldContSigil /^\t\+ *\zs|/
 " Show item: a bare `show` (any case) or a bare `!`.
 syntax match heraldShow /^\t\+ *\c\%(show\|!\)\s*$/
 
+" Clear item: a bare `%`/`%%`/`%N` collapses its lane's completed run below it. Flagged on a
+" yellow background so it reads as an action mark.
+syntax match heraldClear /^\t\+ *%\+\d*\s*$/
+
 " Status markers (controller-written): [EXECUTING] [DONE] [NEEDS ATTENTION] [NO DIR …] …
 syntax match heraldStatus /^\t\+ *\[[^\]]*\]\s*$/
+
+" A failed `$command` ([ERROR]) — defined after heraldStatus so it wins on the same line.
+syntax match heraldError /^\t\+ *\c\[[^\]]*error[^\]]*\]\s*$/
 
 " Show-now line: any line whose first non-tab char is `!` reveals its pane/session now. The
 " whole line is flagged black-on-white, overriding the per-item rules above. Defined last so
@@ -59,12 +66,16 @@ highlight default link heraldContSigil    Statement
 highlight default link heraldCommandSigil Operator
 highlight default link heraldCommandText  String
 highlight default link heraldShow         Keyword
-" Orange across the whole line, matching the Sublime setup; `default` so a colorscheme can override.
-highlight default heraldNote guifg=#FF791A ctermfg=208
+" Linked to Comment so `-> …` notes read like the `#` rows, matching the Sublime setup.
+highlight default link heraldNote Comment
 " White on red, matching the Sublime setup; `default` so a colorscheme can override.
 highlight default heraldStatus guifg=#ffffff guibg=#dc0404 ctermfg=15 ctermbg=196
+" White on bright red for a failed command, matching the Sublime setup.
+highlight default heraldError guifg=#ffffff guibg=#ff0000 ctermfg=15 ctermbg=196
 " Black on white for a leading-`!` show-now line; `default` so a colorscheme can override.
 highlight default heraldShowNow guifg=#000000 guibg=#ffffff ctermfg=0 ctermbg=15
+" Black on yellow for a `%` clear-below line; `default` so a colorscheme can override.
+highlight default heraldClear guifg=#000000 guibg=#ffe600 ctermfg=0 ctermbg=226
 " Macro calls: black on LINE green (#06C755); `default` so a colorscheme can override.
 highlight default heraldMacro guifg=#000000 guibg=#06c755 ctermfg=black ctermbg=41
 

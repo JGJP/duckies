@@ -55,6 +55,13 @@
 			}
 		},
 		{
+			"comment": "Clear item: a bare `%`/`%%`/`%N` collapses its lane's completed run below it. Matched before the worktree fallback so `%` isn't read as a label; the theme gives it a yellow background so it stands out as an action mark.",
+			"match": "^\\t+ *(%+\\d*)[ ]*$",
+			"captures": {
+				"1": { "name": "markup.other.clear.herald" }
+			}
+		},
+		{
 			"comment": "Status marker: [EXECUTING] (active). A leading `!` (reveal now) is handled by the show-now rule above.",
 			"match": "^\\t+ *((?i:\\[[^\\]]*executing[^\\]]*\\]))[ ]*$",
 			"captures": {
@@ -76,6 +83,13 @@
 			}
 		},
 		{
+			"comment": "Status marker: [ERROR] (a failed $command; halts the lane).",
+			"match": "^\\t+ *((?i:\\[[^\\]]*error[^\\]]*\\]))[ ]*$",
+			"captures": {
+				"1": { "name": "invalid.illegal.error.herald" }
+			}
+		},
+		{
 			"comment": "Any other bracketed marker (e.g. [NO DIR …], [DUPLICATE]) is a session marker.",
 			"match": "^\\t+ *(\\[[^\\n]*\\])[ ]*$",
 			"captures": {
@@ -83,9 +97,9 @@
 			}
 		},
 		{
-			"comment": "Note: a `-> …` line herald mirrors below a finished prompt (an inert one-line summary of the turn). Matched before the worktree fallback so the non-sigil line isn't read as a worktree label. The whole line gets one scope so it can be rendered yellow (see the token color default in package.json).",
+			"comment": "Note: a `-> …` line herald mirrors below a finished prompt (an inert one-line summary of the turn). Matched before the worktree fallback so the non-sigil line isn't read as a worktree label. Scoped as a comment so it inherits the theme's comment styling, matching the `#` rows above.",
 			"match": "^\\t+ *->.*$",
-			"name": "markup.other.note.herald"
+			"name": "comment.line.note.herald"
 		},
 		{
 			"comment": "Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing repo). Mirrors parse()'s fallback branch; styled as a class name, the same scope as the repo header it stands in for. A leading `!` (show it now) is handled by the show-now rule above.",

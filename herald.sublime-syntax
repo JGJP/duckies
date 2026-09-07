@@ -29,7 +29,7 @@ contexts:
 
     # Macro call: a `@name [args]` line the controller expands to a reusable block (see
     # herald-macros.yaml). A name char must follow the `@`, so a `@@@…` body line never
-    # matches. The whole call reads as one unit (function scope → yellow in most schemes).
+    # matches. The whole call reads as one unit (function scope → green, see the color scheme).
     - match: '^[ \t]*(@[\w-]+(?:[ \t].*)?)$'
       captures:
         1: entity.name.function.macro.herald
@@ -54,8 +54,8 @@ contexts:
         1: keyword.control.prompt.herald
         2: meta.prompt.herald
 
-    # Command: `$` sigil runs in the shell window; `$$`/`$2` target lane 2, etc. Sigil
-    # and text share a contiguous region so a background color has no gaps. A leading `!`
+    # Command: `$` sigil runs in the shell window; `$$`/`$2` target lane 2, etc. Sigil and
+    # text share a scope so the whole command reads blue (see the color scheme). A leading `!`
     # reveals the shell window now, handled by the show-now rule above.
     - match: '^\t+[ ]*(\$+\d*)(.*)$'
       captures:
@@ -66,6 +66,13 @@ contexts:
     - match: '^\t+[ ]*(?i:(show|!))[ ]*$'
       captures:
         1: keyword.control.show.herald
+
+    # Clear item: a bare `%`/`%%`/`%N` collapses its lane's completed run below it (see parse()).
+    # Matched before the worktree fallback so `%` isn't read as a label; the color scheme gives
+    # it a yellow background so it stands out as an action marker.
+    - match: '^\t+[ ]*(%+\d*)[ ]*$'
+      captures:
+        1: markup.other.clear.herald
 
     # Status markers (controller-written). Each state gets its own scope so the
     # queue reads like a traffic light: executing = active, done = success,
@@ -80,6 +87,10 @@ contexts:
     - match: '^\t+[ ]*((?i:\[[^\]]*attention[^\]]*\]))[ ]*$'
       captures:
         1: invalid.deprecated.attention.herald
+    # A failed `$command` (non-zero exit): the loudest alarm, since it halts the lane.
+    - match: '^\t+[ ]*((?i:\[[^\]]*error[^\]]*\]))[ ]*$'
+      captures:
+        1: invalid.illegal.error.herald
     # Anything else in brackets (e.g. [NO DIR …], [DUPLICATE]) is a session marker.
     - match: '^\t+[ ]*(\[[^\n]*\])[ ]*$'
       captures:
@@ -87,10 +98,10 @@ contexts:
 
     # Note: a `-> …` line herald mirrors below a finished prompt — an inert one-line summary
     # of the turn (see the note pass in parse()/buildOps). Matched before the worktree fallback
-    # so the non-sigil line isn't read as a worktree label. The whole line gets one scope so the
-    # color scheme can render it yellow (see herald.sublime-color-scheme).
+    # so the non-sigil line isn't read as a worktree label. Scoped as a comment so it inherits
+    # the scheme's muted comment styling, matching the `#` rows above.
     - match: '^\t+[ ]*->.*$'
-      scope: markup.other.note.herald
+      scope: comment.line.note.herald
 
     # Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing
     # repo). It matches none of the rules above, mirroring parse()'s fallback branch, and

@@ -85,8 +85,10 @@ const C = {
 	exec: '\x1b[38;5;220m',
 	done: '\x1b[38;5;114m',
 	attn: '\x1b[1;38;5;203m',
+	error: '\x1b[38;5;231;48;2;255;0;0m', // white on bright red — a failed `$command`
 	marker: '\x1b[38;5;203m',
 	shownow: '\x1b[38;5;16;48;5;231m', // black on white — a leading-`!` "show now" line
+	clear: '\x1b[38;5;16;48;2;255;230;0m', // black on yellow — a `%` clear-below line
 	gutter: '\x1b[38;5;240m',
 	gutterCur: '\x1b[38;5;250m',
 	status: '\x1b[7m',
@@ -139,9 +141,12 @@ function colorsFor(line: string): (string | null)[] {
 		fill(lead + m[0].length, n, C.cmdText)
 	} else if (/^show[ ]*$/i.test(body)) {
 		fill(lead, n, C.show)
+	} else if (/^%+\d*[ ]*$/.test(body)) {
+		// A `%`/`%%`/`%N` clear-below line — highlighted on yellow so it reads as an action mark.
+		fill(lead, n, C.clear)
 	} else if ((m = body.match(/^(\[[^\]]*\])[ ]*$/))) {
 		const inner = m[1].toLowerCase()
-		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : C.marker
+		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : inner.includes('error') ? C.error : C.marker
 		fill(lead, lead + m[1].length, c)
 	} else {
 		// A worktree name (indented non-sigil): a git worktree of the enclosing repo,

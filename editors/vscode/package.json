@@ -35,12 +35,12 @@
 			"editor.tokenColorCustomizations": {
 				"textMateRules": [
 					{
-						"scope": "markup.other.note.herald",
-						"settings": { "foreground": "#FF791A" }
-					},
-					{
 						"scope": "markup.other.shownow.herald",
 						"settings": { "foreground": "#000000", "background": "#FFFFFF" }
+					},
+					{
+						"scope": "markup.other.clear.herald",
+						"settings": { "foreground": "#000000", "background": "#FFE600" }
 					}
 				]
 			}

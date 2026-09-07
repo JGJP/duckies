@@ -495,7 +495,7 @@ that matches `herald-aliases.yaml` uses the mapped path. See the aliases section
 
 - **Sublime Text** — `herald.sublime-syntax` (drop into `Packages/User`). Drop
   `herald.tmPreferences` in alongside it so `toggle_comment` (`Cmd`/`Ctrl`+`/`)
-  comments rows out with `#`. For the black-on-yellow **macro** styling, copy
+  comments rows out with `#`. For the green **macro** / blue **command** styling, copy
   `herald.sublime-color-scheme`, rename it to match your active color scheme (e.g.
   `Mariana.sublime-color-scheme`), and place it where Sublime will merge it — in
   `Packages/User` if your scheme is built-in, or in its own package folder (e.g.
