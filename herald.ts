@@ -244,6 +244,12 @@ interface Prompt {
 	// deletes the line — the request is consumed, not left as clutter.
 	isShow: boolean
 	fired: boolean
+	// A bare `%` line: a queue item that, when the drain reaches it (everything below it in
+	// its lane has run), deletes every prompt/command below it in that lane — and itself —
+	// collapsing the lane's completed run. `%`/`%1` scope to lane 1, `%%`/`%2` to lane 2, etc.
+	// Like `show` it never gets a marker; `fired` is set the tick it acts and buildOps does the
+	// deletion. A leading `%` is chosen because it never starts a prompt/command/comment.
+	isClear?: boolean
 	// A leading `!` on this item — on its own line (`!: do the thing`, `!$ run me`) or on its
 	// status marker line (`![NEEDS ATTENTION]`) — is a one-shot "reveal this item's window now"
 	// request, like a leading `!` on a header. It fires once (`showNowFired`) and buildOps strips
@@ -302,6 +308,9 @@ const CMD_RE = /^(\$+)(\d*)\s*/
 // An indented `#` line is a barrier (halts the drain). A plain `#` is global — it halts
 // every lane; `##`/`#2` halt lane 2 only, `###`/`#3` lane 3, etc.
 const BARRIER_RE = /^(#+)(\d*)\s*/
+// A bare `%` line clears its lane's completed run below it when the drain reaches it. `%`/`%1`
+// scope to lane 1, `%%`/`%2` to lane 2, etc. Nothing may follow the sigil — it's just the mark.
+const CLEAR_RE = /^(%+)(\d*)$/
 // A `|` line continues the prompt above it as a multiline body (YAML block-scalar style):
 // each body line is prefixed so it's unambiguous — never mistaken for a worktree — and its
 // own indentation is preserved. The `|` and one optional following space are stripped; the
@@ -500,6 +509,25 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				isShow: true,
 				fired: false,
 			})
+		} else if (CLEAR_RE.test(t)) {
+			// A bare `%` line: clear this lane's completed prompts/commands below it once the
+			// drain reaches it. `%`/`%1`→lane 1, `%%`/`%2`→lane 2, … (like the other sigils).
+			const m = t.match(CLEAR_RE)!
+			target.prompts.push({
+				text: '',
+				lineIdx: i,
+				bodyEndIdx: i,
+				order: i,
+				indent: tabs,
+				marker: null,
+				desiredKind: null,
+				isCmd: false,
+				isBarrier: false,
+				pane: paneFromSigil(m[1], m[2]),
+				isShow: false,
+				isClear: true,
+				fired: false,
+			})
 		} else if (/^\[.*\]$/.test(t)) {
 			// A leading `!` on a marker means "reveal this item's window now".
 			const bang = leadingBang
@@ -567,10 +595,35 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 
 type Op = { pos: number; type: 'replace' | 'delete' | 'insert'; text?: string }
 
-export function buildOps(sessions: Session[]): Op[] {
+// `skip` names sessions whose header is being removed wholesale this tick (see
+// vacatedSessions) — their marker/note ops are pointless, so we don't emit them.
+export function buildOps(sessions: Session[], skip?: Set<Session>): Op[] {
 	const ops: Op[] = []
 	for (const s of sessions) {
+		if (skip?.has(s)) continue
+		// A fired `%N` "clear below" marker deletes itself plus every lane-N prompt/command below
+		// it (with its marker/note/body lines), collapsing that lane's completed run. Collect the
+		// doomed line indices first so the marker pass below skips those items and never re-adds
+		// their markers. Other lanes, barriers, `show`s and `#` comments below the `%` are kept.
+		const clearedLines = new Set<number>()
+		const clearedItems = new Set<Prompt>()
+		for (const c of s.prompts) {
+			if (!c.isClear || !c.fired) continue
+			clearedItems.add(c)
+			clearedLines.add(c.lineIdx)
+			for (const p of s.prompts) {
+				if (p.pane !== c.pane || p.lineIdx <= c.lineIdx || p.isClear || p.isBarrier || p.isShow) continue
+				clearedItems.add(p)
+				for (let ln = p.lineIdx; ln <= p.bodyEndIdx; ln++) clearedLines.add(ln)
+				if (p.marker) clearedLines.add(p.marker.lineIdx)
+				if (p.note) clearedLines.add(p.note.lineIdx)
+			}
+		}
+		for (const ln of clearedLines) ops.push({ pos: ln, type: 'delete' })
 		for (const p of s.prompts) {
+			// An unfired `%` is inert (no marker); a fired one — and the items it clears — are
+			// handled by the deletion pass above, so skip them here.
+			if (p.isClear || clearedItems.has(p)) continue
 			// A fired `show` item is consumed by deleting its line; it has no marker.
 			if (p.isShow) {
 				if (p.fired) ops.push({ pos: p.lineIdx, type: 'delete' })
@@ -1482,7 +1535,7 @@ const laneView = (s: Session, n: number): Session => ({ ...s, prompts: s.prompts
 const macroHasClaude = (p: Prompt) => !!p.isMacro && p.steps!.some((st) => !st.isCmd)
 const macroHasShell = (p: Prompt) => !!p.isMacro && p.steps!.some((st) => st.isCmd)
 // Whether an item feeds the claude pane: a plain prompt, or a macro with a prompt step.
-const isClaudeItem = (p: Prompt) => (p.isMacro ? macroHasClaude(p) : !p.isCmd && !p.isBarrier && !p.isShow)
+const isClaudeItem = (p: Prompt) => (p.isMacro ? macroHasClaude(p) : !p.isCmd && !p.isBarrier && !p.isShow && !p.isClear)
 const laneHasClaude = (s: Session, n: number) => s.prompts.some((p) => p.pane === n && isClaudeItem(p))
 const laneHasShell = (s: Session, n: number) => s.prompts.some((p) => p.pane === n && (p.isMacro ? macroHasShell(p) : p.isCmd))
 const lanePromptCount = (s: Session, n: number) => s.prompts.filter((p) => p.pane === n && isClaudeItem(p)).length
@@ -1543,16 +1596,22 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 		}
 		keepOnly(s, item)
 	}
-	// Walk up the queue from `cursor` (bottom-to-top): fire and consume any `show`
-	// items instantly (they switch the tmux client, then their line is deleted), until we
-	// reach a real item to dispatch, a `#` barrier (halt), or the top. `hold` (a
-	// just-finished item) keeps the frontier marker if nothing dispatches.
+	// Walk up the queue from `cursor` (bottom-to-top): fire and consume any `show` or `%`
+	// items instantly (a `show` switches the tmux client; a `%` marks itself fired so buildOps
+	// deletes the completed run below it), until we reach a real item to dispatch, a `#` barrier
+	// (halt), or the top. `hold` (a just-finished item) keeps the frontier marker if nothing
+	// dispatches.
 	const drainUp = (cursor: number, hold: Prompt | null) => {
 		for (;;) {
 			const next = nearestAbove(s, cursor)
 			if (next?.isShow) {
 				out.push({ type: 'show', window: lastTaskWindow(s, next.order) })
 				next.fired = true
+				cursor = next.order
+				continue
+			}
+			if (next?.isClear) {
+				next.fired = true // buildOps deletes it and the lane's finished items below it
 				cursor = next.order
 				continue
 			}

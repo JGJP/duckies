@@ -232,6 +232,28 @@ check('a numbered `#2` barrier leaves lane 1 free to run', nScoped.disp.some((d)
 const bFlags = parse('alpha\n\t# a\n\t#2 b\n\t## c\n').sessions[0].prompts
 check('barrierGlobal is set for `#` only, not `#2`/`##`', bFlags[0].barrierGlobal === true && !bFlags[1].barrierGlobal && !bFlags[2].barrierGlobal)
 
+// A bare `%` line is a lane-scoped "clear below" marker: `%`/`%1`→lane 1, `%%`/`%2`→lane 2, …
+const clrParse = parse('alpha\n\t%\n\t%%\n\t%3\n').sessions[0].prompts
+check('`%`/`%%`/`%N` parse as clear items with lane panes', clrParse.length === 3 && clrParse.every((p) => p.isClear) && clrParse.map((p) => p.pane).join(',') === '1,2,3')
+// A trailing token means it is NOT a clear marker (parsed as a worktree/other), so it never deletes.
+check('`% text` is not a clear marker', !parse('repo\n\t% not a marker\n').sessions.some((s) => s.prompts.some((p) => p.isClear)))
+// An unfired `%` is inert and round-trips verbatim.
+const clrRtSrc = 'alpha\n\t: task\n\t%\n\t: old\n\t\t[DONE]\n'
+const clrRt = parse(clrRtSrc)
+check('an unfired `%` round-trips verbatim', applyOps(clrRt.lines, buildOps(clrRt.sessions)).join('\n') === clrRtSrc)
+// A fired `%` deletes itself and its lane's prompts/commands below it, keeping items above it
+// and other lanes. (buildOps does the deletion off the `fired` flag planQueue sets.)
+const clr = parse('alpha\n\t: keep above\n\t%\n\t: gone1\n\t:2 keep lane2\n\t$ gone2\n')
+clr.sessions[0].prompts.find((p) => p.isClear)!.fired = true
+const clrOut = applyOps(clr.lines, buildOps(clr.sessions)).join('\n')
+check('a fired `%` deletes lane-1 items below it and itself', !clrOut.includes('gone1') && !clrOut.includes('gone2') && !/^\t%$/m.test(clrOut))
+check('a fired `%` keeps items above it and other lanes', clrOut.includes('keep above') && clrOut.includes('keep lane2'))
+// A fired `%2` is lane-scoped: it deletes lane-2 items below it but leaves lane 1 alone.
+const clr2 = parse('alpha\n\t: lane1 keep\n\t%2\n\t:2 lane2 gone\n\t$ lane1 keep too\n')
+clr2.sessions[0].prompts.find((p) => p.isClear)!.fired = true
+const clr2Out = applyOps(clr2.lines, buildOps(clr2.sessions)).join('\n')
+check('a fired `%2` deletes only lane 2 below it', !clr2Out.includes('lane2 gone') && clr2Out.includes('lane1 keep') && clr2Out.includes('lane1 keep too'))
+
 // 5c. `$` command lines parse as one-shot commands (isCmd) separate from prompts.
 const cmds = 'alpha\n\tprompt: do a\n\t$git status\n\t$pnpm test\n'
 const cm = parse(cmds)

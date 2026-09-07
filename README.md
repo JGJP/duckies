@@ -239,6 +239,15 @@ moonbase-2
   deletes the `show` line — a one-shot request, ordered like everything else in the
   queue. If the session isn't running yet it's spawned first, then shown when its
   turn comes.
+- A bare `%` line is a **queue item** that **collapses its lane's completed run**: when
+  the drain reaches it (everything below it in the lane has run), the supervisor deletes
+  every `prompt`/`$command` below it in that lane — along with itself — leaving only the
+  work above it. It's lane-scoped like the other sigils: `%`/`%1` clears lane 1, `%%`/`%2`
+  clears lane 2, and so on; a `%2` leaves lane 1 (and every other lane) untouched. Use it
+  to keep a session tidy — the old `[DONE]` pile below the mark clears itself once it's run.
+  If clearing empties a **live** label entirely, the label itself is then removed (a worktree
+  cascades up to remove its now-empty repo), so a `%` at the top of a worktree cleans the whole
+  thing away when its work is done. Idle or never-spawned empty headers are left in place.
 - Only the **current** item **per lane** keeps a marker — it is that lane's *frontier*:
   items above it (nearer the top) are still pending, items below it have already run.
   When the next item is marked `[EXECUTING]`, the previous marker is stripped, so each
@@ -256,9 +265,12 @@ moonbase-2
 | Number a sigil (`:2`/`::`, `$2`/`$$`, `#2`/`##`) | Routes the item to a parallel lane that runs concurrently — a 2nd Claude (`claude2`) / shell (`shell2`), created on demand |
 | Add an indented `#` line | Halts the drain there (a barrier / comment) until you delete it — a plain `#` halts every lane, a numbered `#2`/`##` only that lane; a column-0 `#` is just a comment |
 | Add a `show` line | When the queue reaches it, switches your attached tmux client to this session, then deletes the line |
+| Add a `%` line (`%`/`%%`/`%N`) | When the drain reaches it, deletes that lane's completed `prompt`/`$command` lines below it — and itself — collapsing the finished run |
 | Add a leading `!` to a session header | Switches your attached tmux client to this session immediately (queue-independent), then strips the `!` |
 | Add a leading `!` at the start of any item line (or its marker, or a `|` body line → the parent prompt) | Reveals that item's window immediately — the shell for a `$command`, the claude pane for a prompt — then strips the `!` |
-| Delete all prompts under a session | Sends `/clear` (session stays alive, idle) |
+| Delete all prompts under a session (keeping the header / other lines) | Sends `/clear` (session stays alive, idle) |
+| Delete all of a numbered lane's lines (`:N`/`$N`) | Tears down that lane's `claude<N>`/`shell<N>` windows and state — the session and its other lanes stay alive |
+| Empty a **live** label completely (no lines left under it — e.g. via `%`) | Removes the label itself; a finished worktree cascades up to remove its now-empty repo too. Idle/never-spawned empty headers are left alone |
 | Delete the session name | Kills the tmux session — and, for a worktree, `git worktree remove --force`s it too (uncommitted changes discarded) |
 | Answer a `[NEEDS ATTENTION]` prompt | Type directly into the tmux; the marker flips back to `[EXECUTING]` on submit, then `[DONE]` when Claude finishes |
 | Type a prompt straight into the claude pane | Mirrors it back into the file as a new `:` row (marked `[EXECUTING]` → `[DONE]`) — see below |
