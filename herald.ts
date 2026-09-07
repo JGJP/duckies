@@ -993,6 +993,11 @@ function captureFiles(label: string): { n: number; kind: 'in' | 'incmd' }[] {
 	} catch {}
 	return out
 }
+// A prompt the harness injects to re-invoke a session on its own — notably the
+// `<task-notification>` block fired when a background task/loop completes. It fires the
+// UserPromptSubmit hook like a real prompt, but no human typed it, so it must not be
+// mirrored back into the `.herald` file as a captured `:` line.
+export const isSyntheticPrompt = (p: string): boolean => /^\s*<task-notification>/.test(p)
 // Read a capture log without consuming it: the parsed items, the byte length seen (so exactly
 // that prefix is truncated once the tick commits, leaving any concurrent append for next
 // tick), and the file's mtime (≈ the submit time, used to gate a captured prompt's Stop).
@@ -1013,7 +1018,7 @@ function readCapture(path: string, kind: 'in' | 'incmd'): { items: string[]; len
 		else
 			try {
 				const p = JSON.parse(line).prompt
-				if (typeof p === 'string' && p !== '') items.push(p)
+				if (typeof p === 'string' && p !== '' && !isSyntheticPrompt(p)) items.push(p)
 			} catch {}
 	}
 	return { items, len: Buffer.byteLength(content, 'utf8'), mtime: safeMtime(path) }

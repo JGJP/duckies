@@ -952,6 +952,14 @@ check(
 	check('non-slash text is left to exact matching', slashEcho('git status', 'git status') === false)
 }
 
+{
+	// A `<task-notification>` block is a harness-injected prompt (a background task completing
+	// re-invokes the session), not something a human typed — it must not be captured.
+	check('a task-notification prompt is synthetic', isSyntheticPrompt('<task-notification>\n<task-id>x</task-id>\n</task-notification>') === true)
+	check('a leading-whitespace task-notification is synthetic', isSyntheticPrompt('  <task-notification>foo') === true)
+	check('an ordinary prompt is not synthetic', isSyntheticPrompt('deploy the app') === false)
+}
+
 // One-line `-> ` summaries mirrored below a finished prompt. parse treats a `-> …` line as an
 // inert note on the prompt above it (never a worktree); buildOps writes a pending desiredNote
 // just below the marker/body, once.
