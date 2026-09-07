@@ -198,6 +198,8 @@ moonbase-2
   block `$` work in lane 1. Extra windows (`claude2`, `shell2`, …) are created on demand.
   Each lane reports completion via its own done-files (`state/<label>.2.cmd`, etc.). Note:
   every `:N` lane is a *separate* Claude conversation running concurrently under your account.
+  Delete all of a lane's lines and its extra windows (`claude<N>`/`shell<N>`) are torn down
+  on the next tick — the session and its other lanes stay alive; only that lane goes.
 - **Worktrees.** An indented line that *isn't* a sigil (`:`/`$`/`@`/`#`/`show`) names a
   **git worktree** of its session's repo. Items indented **below** it run in that worktree
   — it's its own session (own tmux windows, own Claude), created on demand the first time it

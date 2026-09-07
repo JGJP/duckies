@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildOps, dropDuringAttention, frontierWindow, hasPendingInput, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho } from './herald'
+import { aliasWorktree, applyOps, buildOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho, vacatedSessions, vacateOps } from './herald'
 import { merge3, nearestIndex, toLines } from './tui'
 
 let failures = 0
@@ -571,6 +571,36 @@ check('a session still in the model (or reserved) is not reaped', !reaped.some((
 // A worktree whose rt entry is missing (e.g. never stamped) is still killed, just not
 // removed from disk — never throws on the absent entry.
 check('a reaped label with no rt entry yields a null worktree', reapTargets(['gone'], new Set<string>(), new Set<string>(), {}).every((r) => r.worktree === null))
+
+// Vacating: a label drained to nothing is removed — its whole block deleted — but only when it
+// (or something in its subtree) is live, so freshly-typed / idle-empty headers are left alone.
+const vac = (src: string, live: string[]) => {
+	const { lines, sessions } = parse(src)
+	const { tops, all } = vacatedSessions(sessions, new Set(live))
+	return { tops, all, out: applyOps(lines, vacateOps(tops, lines)).join('\n') }
+}
+check('a live empty repo is removed', vac('app\n', ['app']).out.trim() === '')
+check('a not-live empty repo is kept (freshly typed / idle)', vac('app\n', []).out.includes('app'))
+check('a repo with content is kept', vac('app\n\t: do it\n', ['app']).out.includes('do it'))
+// Cascade: a finished (live) empty worktree and its now-empty repo are removed together in one tick.
+const casc = vac('app\n\tfeat\n', ['app-feat'])
+check('a finished worktree cascades up to remove its empty repo', casc.out.trim() === '' && casc.tops.length === 1 && casc.all.size === 2)
+// Mixed siblings: only the live-empty worktree goes; the repo (and a worktree with work) stay.
+const mixed = vac('app\n\tfeat\n\twork\n\t\t: task\n', ['app-feat'])
+check('only the vacated worktree is removed; repo and busy sibling stay', !mixed.out.includes('feat') && mixed.out.includes('work') && mixed.out.includes('task'))
+// An empty worktree that was never live (an inert note) is left alone.
+check('an inert (never-live) empty worktree is kept', vac('app\n\tnote\n', []).out.includes('note'))
+// Removing a label that sat between two blank lines collapses the pair — no lingering double blank.
+const surrounded = vac('app\n\t: a\n\nfeat\n\nnext\n\t: b\n', ['feat'])
+check('a blank-surrounded removed label leaves no double blank', !surrounded.out.includes('\n\n\n') && surrounded.out.includes('app') && surrounded.out.includes('next'))
+
+// Lane teardown: a numbered tmux lane (n>1) whose `:n`/`$n` lines were deleted from the file
+// is reaped, while lanes still in the model — or with manual input mid-capture this tick — and
+// lane 1 (the session itself) are left alone.
+check('a live lane no longer in the model is reaped', JSON.stringify(lanesToReap([2, 3, 4], [2], [])) === JSON.stringify([3, 4]))
+check('lane 1 is never reaped (it is the session)', JSON.stringify(lanesToReap([1, 2], [2], [])) === JSON.stringify([]))
+check('a lane with pending captured input is kept', JSON.stringify(lanesToReap([2, 3], [], [3])) === JSON.stringify([2]))
+check('nothing reaped when every live lane is still modelled', JSON.stringify(lanesToReap([2, 3], [2, 3], [])) === JSON.stringify([]))
 
 // A leading `!` on a worktree label means "show it now", exactly like on a repo header:
 // it's stripped from the tmux label and the on-disk dir leaf so both stay clean.

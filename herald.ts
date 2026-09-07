@@ -676,6 +676,54 @@ export function applyOps(lines: string[], ops: Op[]): string[] {
 	return out
 }
 
+// Sessions whose label line should be removed because the label no longer holds anything: no
+// prompts/commands of its own and every child worktree likewise vacated. A finished worktree is
+// removed, and if that leaves its repo empty the repo goes too (the cascade runs in one tick,
+// while the worktree is still live). Guarded on liveness — a session is only removed if it, or
+// something in its subtree, is a live tmux session — so a freshly-typed header you haven't queued
+// work under yet, or a deliberately-empty note, is left alone. Returns the top-most removable
+// sessions (delete their whole block, headerIdx..lastChildIdx) and the full removed set (buildOps
+// skips these, since their markers are about to vanish). Pure, so it's unit-testable.
+export function vacatedSessions(sessions: Session[], liveLabels: Set<string>): { tops: Session[]; all: Set<Session> } {
+	const ordered = [...sessions].sort((a, b) => a.headerIdx - b.headerIdx)
+	const depth = (s: Session) => (s.indent ?? '').length
+	const parent = new Map<Session, Session | null>()
+	const children = new Map<Session, Session[]>()
+	const stack: Session[] = []
+	for (const s of ordered) {
+		children.set(s, [])
+		while (stack.length && depth(stack[stack.length - 1]) >= depth(s)) stack.pop()
+		const p = stack.length ? stack[stack.length - 1] : null
+		parent.set(s, p)
+		if (p) children.get(p)!.push(s)
+		stack.push(s)
+	}
+	const removed = new Set<Session>()
+	const liveSub = new Map<Session, boolean>()
+	// Bottom-up (deepest headerIdx first) so a child's verdict is known before its parent's.
+	for (const s of [...ordered].reverse()) {
+		const kids = children.get(s)!
+		liveSub.set(s, liveLabels.has(s.label) || kids.some((k) => liveSub.get(k)!))
+		if (s.prompts.length === 0 && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
+	}
+	const tops = ordered.filter((s) => removed.has(s) && !(parent.get(s) && removed.has(parent.get(s)!)))
+	return { tops, all: removed }
+}
+
+// Delete ops for the vacated blocks (headerIdx..lastChildIdx each). When a block sat between two
+// blank lines, one of them is dropped too, so removing the label doesn't leave a double blank
+// where a single separator belongs. A Set dedups the shared blank between two adjacent removals.
+export function vacateOps(tops: Session[], lines: string[]): Op[] {
+	const del = new Set<number>()
+	for (const s of tops) {
+		for (let ln = s.headerIdx; ln <= s.lastChildIdx; ln++) del.add(ln)
+		const above = s.headerIdx - 1
+		const below = s.lastChildIdx + 1
+		if (above >= 0 && lines[above]?.trim() === '' && lines[below]?.trim() === '') del.add(below)
+	}
+	return [...del].map((pos) => ({ pos, type: 'delete' as const }))
+}
+
 // ---------------------------------------------------- capture-to-file placement
 
 // A manually-typed item captured from a live pane: a claude prompt (isCmd false) or a shell
@@ -907,6 +955,15 @@ const rmAllDoneFiles = (label: string) => {
 		}
 	}
 }
+// Remove just one lane's state files (single-lane teardown), so its numbered done/capture
+// logs don't linger — or get re-read — after the lane's panes are gone.
+const rmLaneFiles = (label: string, n: number) => {
+	for (const ext of ['json', 'cmd', 'in', 'incmd']) {
+		try {
+			unlinkSync(join(STATE, `${label}${paneSuffix(n)}.${ext}`))
+		} catch {}
+	}
+}
 const safeMtime = (p: string): number => {
 	try {
 		return statSync(p).mtimeMs
@@ -1079,6 +1136,28 @@ async function taggedPane(label: string, kind: PaneKind, n: number): Promise<str
 		if (id && tag === role) return id
 	}
 	return null
+}
+
+// The numbered lanes (n>1) that currently have a tmux window for this session, read from
+// the @herald tag (or the window name, if a restore stripped the tag). Lane 1 is the bare
+// `claude`/`shell` session windows and never appears here — used to reap lanes whose lines
+// were deleted from the file.
+async function liveLanes(label: string): Promise<Set<number>> {
+	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(label)} -F ${'#{@herald}\t#{window_name}'}`
+	const out = new Set<number>()
+	for (const line of r.stdout.split('\n')) {
+		const [tag, win] = line.split('\t')
+		const m = /^(?:claude|shell)(\d+)$/.exec(tag || win || '')
+		if (m) out.add(parseInt(m[1], 10))
+	}
+	return out
+}
+// The numbered lanes to tear down this tick: every live tmux lane (n>1) no longer backed by
+// a model lane and without pending captured input (its `:n`/`$n` lines were deleted). Pure so
+// the reap decision can be unit-tested apart from the tmux/state I/O.
+export const lanesToReap = (live: Iterable<number>, model: number[], pendingCap: number[]): number[] => {
+	const keep = new Set([...model, ...pendingCap])
+	return [...live].filter((n) => n > 1 && !keep.has(n)).sort((a, b) => a - b)
 }
 
 async function typeInto(pane: string, text: string, vimInsert = false) {
@@ -1332,6 +1411,22 @@ async function doKill(label: string, switchTo: string | null) {
 		}
 	}
 	await tm`tmux kill-session -t ${T(label)}`
+}
+
+// Tear down one numbered lane (n>1) whose lines were deleted from the file: kill its
+// `claude<n>`/`shell<n>` windows and drop its state, leaving the rest of the session alive.
+// The session itself (lane 1) is only removed by deleting its header (doKill).
+async function reapLane(label: string, n: number, re: RtEntry) {
+	log(`reaping ${T(label)} lane ${n}`)
+	if (!DRY) {
+		const tm = $({ nothrow: true, quiet: true })
+		for (const kind of ['claude', 'shell'] as PaneKind[]) {
+			const pane = await paneFor(label, kind, n)
+			if (pane) await tm`tmux kill-window -t ${pane}`
+		}
+	}
+	rmLaneFiles(label, n)
+	delete re.lanes[n]
 }
 
 // Bring this session on screen by switching the terminal you're watching to it. With
@@ -1907,6 +2002,15 @@ async function tick(rt: Rt) {
 		// Attention is a per-prompt marker now; strip any legacy session-level one.
 		clearAttention(s)
 
+		// Reap lanes whose lines were deleted from the file: any numbered tmux lane (n>1) no
+		// longer in the model gets its windows + state torn down, leaving the rest of the session
+		// alive. Skip a lane with pending manual input (a `.in`/`.incmd` log this tick) — its new
+		// `:n`/`$n` row isn't in the model until the next parse, so reaping now would kill a pane
+		// the user just typed into and drop that input.
+		if (!DRY)
+			for (const n of lanesToReap(await liveLanes(label), lanesOf(s), captureFiles(label).map((c) => c.n)))
+				actions.push(() => reapLane(label, n, re))
+
 		// Plan each lane independently: filtered view + its own done-files + its own rt.
 		// Different lanes advance concurrently, one active item each.
 		for (const n of lanesOf(s)) {
@@ -2015,8 +2119,11 @@ async function tick(rt: Rt) {
 	// Rewrite each file in place — only the ones whose markers actually changed. Capture
 	// inserts (manually-typed rows) merge with the marker ops; both index into the original
 	// lines, and applyOps orders them so the inserts and any marker deletes don't collide.
+	// A drained-to-nothing label (its finished worktree, then its now-empty repo) has its whole
+	// block deleted; the next tick reaps the vacated tmux session (and worktree) via reapTargets.
 	for (const c of controls) {
-		const ops = [...buildOps(c.sessions), ...(captureOps.get(c.path) ?? [])]
+		const { tops, all } = vacatedSessions(c.sessions, live)
+		const ops = [...buildOps(c.sessions, all), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? [])]
 		const newContent = applyOps(c.lines, ops).join('\n')
 		if (newContent !== c.content) atomicWrite(c.path, newContent)
 	}
