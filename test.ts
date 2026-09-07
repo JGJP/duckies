@@ -334,6 +334,39 @@ check('pure commands drain bottom-to-top', JSON.stringify(cmds2.order) === JSON.
 const gated = drain('alpha\n\t$git push\n\t: make the change\n')
 check('command waits for the prompt below it', JSON.stringify(gated.order) === JSON.stringify(['prompt:make the change', 'cmd:git push']), JSON.stringify(gated.order))
 
+// A `$command` that exits non-zero is marked [ERROR] and halts the lane: nothing above it
+// (the prompt queued to run after it) is dispatched, and the marker persists across ticks.
+const errored = (() => {
+	let content = 'alpha\n\t: runs only if the cmd below succeeds\n\t$ failing-cmd\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
+	let clock = 1000
+	const order: string[] = []
+	for (let i = 0; i < 6; i++) {
+		clock += 100
+		const { lines, sessions } = parse(content)
+		const s = sessions[0]
+		const active = s.prompts.find((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION')
+		const disp = planQueue(s, rt, {
+			now: clock,
+			state: active && !active.isCmd ? { event: 'Stop', mtimeMs: clock } : null,
+			cmdDoneMtime: active?.isCmd ? clock : null,
+			cmdDoneExit: active?.isCmd ? 1 : null,
+		})
+		for (const d of disp) order.push(d.type === 'clear' || d.type === 'show' ? d.type : `${d.type}:${d.text}`)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	return { order, content }
+})()
+check('a failing $command only ever dispatched itself (halts the lane)', JSON.stringify(errored.order) === JSON.stringify(['cmd:failing-cmd']), JSON.stringify(errored.order))
+check('a failing $command is marked [ERROR]', /\$ failing-cmd\n\t\t\[ERROR\]/.test(errored.content), JSON.stringify(errored.content))
+check('the prompt above a failed command never runs', !/runs only.*\n\t\t\[(EXECUTING|DONE)\]/.test(errored.content), JSON.stringify(errored.content))
+
+// A `%` runs everything below it first (bottom-to-top), then collapses that completed run —
+// deleting those lines and itself — leaving only the work above it.
+const collapsed = drain('alpha\n\t: newest\n\t%\n\t: old one\n\t$ old cmd\n')
+check('items below a `%` run before it collapses them', JSON.stringify(collapsed.order) === JSON.stringify(['cmd:old cmd', 'prompt:old one', 'prompt:newest']), JSON.stringify(collapsed.order))
+check('a `%` collapses the completed run below it, keeping the work above', collapsed.content.includes(': newest') && !collapsed.content.includes('old one') && !collapsed.content.includes('old cmd') && !/^\t%$/m.test(collapsed.content), JSON.stringify(collapsed.content))
+
 // Attention: a mid-task Notification flags the prompt, a later Stop completes it.
 const attn = (() => {
 	let content = 'alpha\n\t: fix the bug\n'

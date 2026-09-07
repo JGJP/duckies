@@ -187,11 +187,12 @@ export function macroSteps(body: string, args: string[]): MacroStep[] {
 
 // ---------------------------------------------------------------- parse model
 
-type Kind = 'EXECUTING' | 'DONE' | 'ATTENTION'
+type Kind = 'EXECUTING' | 'DONE' | 'ATTENTION' | 'ERROR'
 const MARKER: Record<Kind, string> = {
 	EXECUTING: '[EXECUTING]',
 	DONE: '[DONE]',
 	ATTENTION: '[NEEDS ATTENTION]',
+	ERROR: '[ERROR]',
 }
 interface Prompt {
 	text: string
@@ -536,9 +537,11 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				? 'EXECUTING'
 				: /attention/i.test(body)
 					? 'ATTENTION'
-					: /done/i.test(body)
-						? 'DONE'
-						: null
+					: /error/i.test(body)
+						? 'ERROR'
+						: /done/i.test(body)
+							? 'DONE'
+							: null
 			// A status marker attaches to the nearest preceding prompt (in this container)
 			// without a marker; anything unrecognised (e.g. [NO DIR …]) is a session marker.
 			const owner = kind ? [...target.prompts].reverse().find((p) => !p.marker && !p.isBarrier && !p.isShow) : undefined
@@ -934,6 +937,17 @@ const cmdDonePath = (label: string, n: number) => join(STATE, `${label}${paneSuf
 const readCmdDone = (label: string, n: number): number | null => {
 	try {
 		return statSync(cmdDonePath(label, n)).mtimeMs
+	} catch {
+		return null
+	}
+}
+// The exit status the per-shell hook wrote into the done-file (its whole contents). Non-zero
+// means the `$command` failed — the planner marks it [ERROR] and halts the lane. Null when the
+// file is missing or unparseable.
+const readCmdExit = (label: string, n: number): number | null => {
+	try {
+		const code = parseInt(readFileSync(cmdDonePath(label, n), 'utf8').trim(), 10)
+		return Number.isNaN(code) ? null : code
 	} catch {
 		return null
 	}
@@ -1552,6 +1566,9 @@ export interface PlanIO {
 	now: number
 	state: { event: string; mtimeMs: number } | null
 	cmdDoneMtime: number | null
+	// Exit status of the just-finished `$command` (see readCmdExit). Non-zero ⇒ the command
+	// failed: mark it [ERROR] and halt the lane instead of draining on. Null/0 ⇒ treat as success.
+	cmdDoneExit?: number | null
 	// Live busy state of the lane's claude pane (its active-turn "esc to interrupt" hint):
 	// true = working, false = idle at the prompt, undefined = unknown/unread (tests, or a
 	// `$`-only lane). Authoritative over stale hook events — a session that resumes on its
@@ -1564,7 +1581,11 @@ export interface PlanIO {
 // bottom-to-top). Ordering is by `order`, not `lineIdx`, so a merged label's rows drain
 // as one cross-file queue.
 const nearestAbove = (s: Session, idx: number): Prompt | null => {
-	const cands = s.prompts.filter((p) => p.order < idx && p.desiredKind === null)
+	// An errored `$command` halts the drain like a `#` barrier: nothing above it (lower order,
+	// i.e. queued later) runs until the [ERROR] line is cleared. errFloor is the highest-order
+	// error below idx; candidates must sit below it (higher order) to still be eligible.
+	const errFloor = Math.max(-Infinity, ...s.prompts.filter((p) => p.desiredKind === 'ERROR' && p.order < idx).map((p) => p.order))
+	const cands = s.prompts.filter((p) => p.order < idx && p.order > errFloor && p.desiredKind === null)
 	return cands.length ? cands.reduce((a, b) => (b.order > a.order ? b : a)) : null
 }
 
@@ -1745,7 +1766,14 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 			}
 			if (!step) advance()
 			else if (step.isCmd) {
-				if (io.cmdDoneMtime !== null && io.cmdDoneMtime > (rt.cmdSentAt ?? 0)) advance()
+				if (io.cmdDoneMtime !== null && io.cmdDoneMtime > (rt.cmdSentAt ?? 0)) {
+					if (io.cmdDoneExit) {
+						// A macro's `$` step failed: mark the whole macro item [ERROR] and halt.
+						rt.macroStep = 0
+						active.desiredKind = 'ERROR'
+						keepOnly(s, active)
+					} else advance()
+				}
 			} else if (step.text.trim() === '/clear') advance()
 			else if (io.paneBusy === true) active.desiredKind = 'EXECUTING'
 			else if (io.state && io.state.event === 'Stop' && io.state.mtimeMs > rt.sentAt) advance()
@@ -1753,8 +1781,15 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 			else if (io.state && io.state.event === 'UserPromptSubmit' && io.state.mtimeMs > rt.sentAt) active.desiredKind = 'EXECUTING'
 		} else if (active.isCmd) {
 			if (io.cmdDoneMtime !== null && io.cmdDoneMtime > (rt.cmdSentAt ?? 0)) {
-				active.desiredKind = 'DONE'
-				drainUp(active.order, active)
+				if (io.cmdDoneExit) {
+					// Non-zero exit: mark [ERROR] and hold the lane's frontier here — don't drain
+					// past it. The lane stays blocked until the [ERROR] line is cleared/fixed.
+					active.desiredKind = 'ERROR'
+					keepOnly(s, active)
+				} else {
+					active.desiredKind = 'DONE'
+					drainUp(active.order, active)
+				}
 			}
 		} else if (active.text.trim() === '/clear') {
 			// `/clear` clears the conversation without invoking the model, so it never
@@ -2059,6 +2094,7 @@ async function tick(rt: Rt) {
 			const cmdSentAtBefore = lr.cmdSentAt
 			const hadActiveCmd = s.prompts.some((p) => p.pane === n && p.isCmd && p.desiredKind === 'EXECUTING')
 			const cmdDoneMtime = readCmdDone(label, n)
+			const cmdDoneExit = cmdDoneMtime !== null ? readCmdExit(label, n) : null
 			// Poll the claude pane's live busy state (lanes with prompts only; `$`-only lanes
 			// have no claude pane). null (unreadable) ⇒ undefined so the planner falls back to
 			// pure hook-driven behavior rather than acting on a bad read.
@@ -2078,7 +2114,7 @@ async function tick(rt: Rt) {
 					if (summary) done.desiredNote = summary
 				}
 			}
-			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, paneBusy })
+			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, cmdDoneExit, paneBusy })
 			if (hadActiveCmd && cmdDoneMtime !== null && cmdDoneMtime > cmdSentAtBefore) rmCmdDone(label, n)
 			for (const d of dispatches) {
 				// Record what we send so the capture pass can tell it from human input (our sends
