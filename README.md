@@ -225,9 +225,11 @@ moonbase-2
   		: try a different approach
   ```
 - `#…` lines are **comments**, and an **indented** one is also a **barrier**: the drain
-  halts when it reaches it (in its lane) until you delete the line — put one below the
+  halts when it reaches it until you delete the line — put one below the
   work you want to stop (the bottom-most item runs first, so a `#` at the very bottom
-  blocks the whole session). A **column-0** `#` is a plain comment (no queue to halt) —
+  blocks the whole session). A plain `#` is **global** — it halts *every* lane, so a
+  `:2`/`:3` prompt with a `#` below it is blocked too; a **numbered** `#2`/`##` halts only
+  that lane, letting the others drain past. A **column-0** `#` is a plain comment (no queue to halt) —
   handy for notes/outlines between sessions. Either way it's never a session, task, or
   marker, and round-trips verbatim. (Only a line that *starts* with `#` counts; a trailing
   `#` is part of a prompt/command's text.)
@@ -252,7 +254,7 @@ moonbase-2
 | Add a `prompt:` line | Queues it; sends it to the claude pane when it reaches the front (the item below is done); marks `[EXECUTING]` → `[DONE]` |
 | Add a `$command` line | Queues it; runs it once in the shell window when it reaches the front; marks `[EXECUTING]` → `[DONE]` when it exits |
 | Number a sigil (`:2`/`::`, `$2`/`$$`, `#2`/`##`) | Routes the item to a parallel lane that runs concurrently — a 2nd Claude (`claude2`) / shell (`shell2`), created on demand |
-| Add an indented `#` line | Halts the drain there (a barrier / comment) until you delete it; a column-0 `#` is just a comment |
+| Add an indented `#` line | Halts the drain there (a barrier / comment) until you delete it — a plain `#` halts every lane, a numbered `#2`/`##` only that lane; a column-0 `#` is just a comment |
 | Add a `show` line | When the queue reaches it, switches your attached tmux client to this session, then deletes the line |
 | Add a leading `!` to a session header | Switches your attached tmux client to this session immediately (queue-independent), then strips the `!` |
 | Add a leading `!` at the start of any item line (or its marker, or a `|` body line → the parent prompt) | Reveals that item's window immediately — the shell for a `$command`, the claude pane for a prompt — then strips the `!` |
@@ -359,7 +361,8 @@ Any row starting with `#` is comment-styled and never runs. A **column-0** `#` i
 plain note (it sits between sessions). An **indented** `#` is also a **barrier** — the
 drain stops there until you remove it. Since the queue drains bottom-to-top, a `#` below
 an item blocks that item (and everything above it); a `#` at the very bottom freezes the
-whole session:
+whole session. A plain `#` blocks **every lane** (a `:2`/`:3` prompt above it waits too);
+number it (`#2`/`##`) to block just that lane:
 
 ```
 # release notes — top-level comment

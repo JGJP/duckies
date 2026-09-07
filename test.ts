@@ -209,6 +209,29 @@ check(
 	JSON.stringify(twoLane),
 )
 
+// A plain `#` barrier is global: it halts every lane, so a `:2` prompt with a `#` below it
+// is blocked — not just lane 1. `laneView` (mirrored here) folds a global barrier into each
+// lane's queue; a numbered `#N` stays scoped to its own lane.
+const laneView = (s: ReturnType<typeof parse>['sessions'][number], n: number) => ({ ...s, prompts: s.prompts.filter((p) => p.pane === n || p.barrierGlobal) })
+const barrierLane = (src: string, n: number) => {
+	const s = parse(src).sessions[0]
+	const rt = { sentAt: 0, cmdSentAt: 0, prevPromptCount: 0 }
+	const disp = planQueue(laneView(s, n), rt, { now: 100, state: null, cmdDoneMtime: null })
+	return { s, disp }
+}
+// `:2` above a plain `#` (comment below it) is blocked; the barrier is global.
+const gBlocked = barrierLane('alpha\n\t:2 work two\n\t# wait\n\t: work one\n', 2)
+check('a plain `#` barrier blocks a numbered lane above it', gBlocked.disp.length === 0 && gBlocked.s.prompts.find((p) => p.text === 'work two')!.desiredKind === null)
+// Without the barrier the same `:2` dispatches — proving it was the `#`, not lane isolation.
+const gOpen = barrierLane('alpha\n\t:2 work two\n\t: work one\n', 2)
+check('the same numbered lane dispatches with no barrier', gOpen.disp.some((d) => d.type === 'prompt' && d.text === 'work two'))
+// A numbered `#2` stays lane-scoped: it does NOT block lane 1's queue.
+const nScoped = barrierLane('alpha\n\t: work one\n\t#2 hold\n\t:2 work two\n', 1)
+check('a numbered `#2` barrier leaves lane 1 free to run', nScoped.disp.some((d) => d.type === 'prompt' && d.text === 'work one'))
+// Parse records global vs. lane-scoped barriers off the raw sigil.
+const bFlags = parse('alpha\n\t# a\n\t#2 b\n\t## c\n').sessions[0].prompts
+check('barrierGlobal is set for `#` only, not `#2`/`##`', bFlags[0].barrierGlobal === true && !bFlags[1].barrierGlobal && !bFlags[2].barrierGlobal)
+
 // 5c. `$` command lines parse as one-shot commands (isCmd) separate from prompts.
 const cmds = 'alpha\n\tprompt: do a\n\t$git status\n\t$pnpm test\n'
 const cm = parse(cmds)

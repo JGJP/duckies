@@ -220,10 +220,14 @@ interface Prompt {
 	// [DONE] like a finished prompt. It never enters the claude prompt queue.
 	isCmd: boolean
 	// An indented `#` line: a human-action barrier. It never runs or gets a marker;
-	// when the drain reaches it the queue halts there (in its lane) until the line is
-	// removed. It reads as a comment (comment-scoped, ignored as a task). A column-0
-	// `#` is a plain comment instead — skipped in parse, never a barrier.
+	// when the drain reaches it the queue halts there until the line is removed. It reads
+	// as a comment (comment-scoped, ignored as a task). A column-0 `#` is a plain comment
+	// instead — skipped in parse, never a barrier.
 	isBarrier: boolean
+	// A plain `#` barrier halts *every* lane (its `:2`/`:3` prompts are blocked by a comment
+	// below them too), so a bare `#` gates the whole session. A numbered `#N` (`##`/`#2`, …)
+	// is scoped to lane N only, letting the other lanes drain past it.
+	barrierGlobal?: boolean
 	// A `@name` macro call: one queue item whose `steps` (the expanded, arg-filled body)
 	// run in sequence in this lane. The runtime's `macroStep` cursor tracks which is
 	// current; the item carries a single overall marker (the file keeps the `@name` line).
@@ -295,7 +299,8 @@ interface Session {
 const PROMPT_RE = /^(?:prompt:|(:+)(\d*))\s*/i
 // A command line starts with `$` (runs in the shell window); `$$`/`$2`→lane 2, etc.
 const CMD_RE = /^(\$+)(\d*)\s*/
-// An indented `#` line is a barrier (halts the drain); `##`/`#2` halt lane 2 only, etc.
+// An indented `#` line is a barrier (halts the drain). A plain `#` is global — it halts
+// every lane; `##`/`#2` halt lane 2 only, `###`/`#3` lane 3, etc.
 const BARRIER_RE = /^(#+)(\d*)\s*/
 // A `|` line continues the prompt above it as a multiline body (YAML block-scalar style):
 // each body line is prefixed so it's unambiguous — never mistaken for a worktree — and its
@@ -471,6 +476,10 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				desiredKind: null,
 				isCmd: false,
 				isBarrier: true,
+				// A plain single `#` (no repeats, no digits) is a global barrier; `##`/`#N` scope
+				// to a lane. paneFromSigil maps a plain `#` to lane 1, so global vs. lane-1 is read
+				// off the raw sigil here rather than the pane.
+				barrierGlobal: m[1].length === 1 && !m[2],
 				pane: paneFromSigil(m[1], m[2]),
 				isShow: false,
 				fired: false,
@@ -1464,9 +1473,11 @@ export const frontierWindow = (s: Session): Window | undefined => {
 // The distinct lanes (pane numbers) present in a session, ascending. Each is planned
 // independently and runs concurrently with the others.
 export const lanesOf = (s: Session): number[] => [...new Set(s.prompts.map((p) => p.pane))].sort((a, b) => a - b)
-// A lane's own view: only its items. planQueue on this mutates the shared Prompt objects
-// but confines drain/frontier/keepOnly to the lane, so each lane keeps its own marker.
-const laneView = (s: Session, n: number): Session => ({ ...s, prompts: s.prompts.filter((p) => p.pane === n) })
+// A lane's own view: its items plus any global (`#`) barrier, so a bare comment halts every
+// lane's drain — a `:2`/`:3` prompt is blocked by a `#` below it, not just a `#2`. planQueue on
+// this mutates the shared Prompt objects but confines drain/frontier/keepOnly to the lane, so
+// each lane keeps its own marker.
+const laneView = (s: Session, n: number): Session => ({ ...s, prompts: s.prompts.filter((p) => p.pane === n || p.barrierGlobal) })
 // A macro item needs a claude pane if any step is a prompt, a shell pane if any is a `$`.
 const macroHasClaude = (p: Prompt) => !!p.isMacro && p.steps!.some((st) => !st.isCmd)
 const macroHasShell = (p: Prompt) => !!p.isMacro && p.steps!.some((st) => st.isCmd)
