@@ -1597,16 +1597,20 @@ export interface PlanIO {
 const nearestAbove = (s: Session, idx: number): Prompt | null => {
 	// An errored `$command` halts the drain like a `#` barrier: nothing above it (lower order,
 	// i.e. queued later) runs until the [ERROR] line is cleared. errFloor is the highest-order
-	// error below idx; candidates must sit below it (higher order) to still be eligible.
-	const errFloor = Math.max(-Infinity, ...s.prompts.filter((p) => p.desiredKind === 'ERROR' && p.order < idx).map((p) => p.order))
+	// error at or below idx; candidates must sit below it (higher order) to still be eligible.
+	// `<= idx` (not `<`) so an error sitting exactly at the frontier still walls off the items
+	// above it — otherwise, once the drain starts at the error line, its followers would run.
+	const errFloor = Math.max(-Infinity, ...s.prompts.filter((p) => p.desiredKind === 'ERROR' && p.order <= idx).map((p) => p.order))
 	const cands = s.prompts.filter((p) => p.order < idx && p.order > errFloor && p.desiredKind === null)
 	return cands.length ? cands.reduce((a, b) => (b.order > a.order ? b : a)) : null
 }
 
 // The bottom-to-top frontier: the top-most already-run item, or the queue bottom on
-// a fresh queue. Shared by planQueue's fresh-dispatch branch and the spawn gate.
+// a fresh queue. Shared by planQueue's fresh-dispatch branch and the spawn gate. An
+// [ERROR] item counts as already-run: the drain must resume from the error line (halting
+// there), not fall back to the queue bottom and re-dispatch items that already completed.
 const frontierIdx = (s: Session): number => {
-	const done = s.prompts.filter((p) => p.desiredKind === 'DONE')
+	const done = s.prompts.filter((p) => p.desiredKind === 'DONE' || p.desiredKind === 'ERROR')
 	return done.length ? Math.min(...done.map((p) => p.order)) : Number.POSITIVE_INFINITY
 }
 

@@ -361,6 +361,33 @@ check('a failing $command only ever dispatched itself (halts the lane)', JSON.st
 check('a failing $command is marked [ERROR]', /\$ failing-cmd\n\t\t\[ERROR\]/.test(errored.content), JSON.stringify(errored.content))
 check('the prompt above a failed command never runs', !/runs only.*\n\t\t\[(EXECUTING|DONE)\]/.test(errored.content), JSON.stringify(errored.content))
 
+// An item that ran *below* a failing command (bottom-to-top, so it ran first and completed)
+// must not be re-dispatched once the command errors: the halted frontier sits at the [ERROR]
+// line, not back at the queue bottom.
+const erroredMid = (() => {
+	let content = 'alpha\n\t: prompt above\n\t$ failing-cmd\n\t: prompt below\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
+	let clock = 1000
+	const order: string[] = []
+	for (let i = 0; i < 8; i++) {
+		clock += 100
+		const { lines, sessions } = parse(content)
+		const s = sessions[0]
+		const active = s.prompts.find((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION')
+		const disp = planQueue(s, rt, {
+			now: clock,
+			state: active && !active.isCmd ? { event: 'Stop', mtimeMs: clock } : null,
+			cmdDoneMtime: active?.isCmd ? clock : null,
+			cmdDoneExit: active?.isCmd ? 1 : null,
+		})
+		for (const d of disp) order.push(d.type === 'clear' || d.type === 'show' ? d.type : `${d.type}:${d.text}`)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	return { order, content }
+})()
+check('a failing command does not re-run the completed item below it', JSON.stringify(erroredMid.order) === JSON.stringify(['prompt:prompt below', 'cmd:failing-cmd']), JSON.stringify(erroredMid.order))
+check('the failed command halts at its [ERROR] line', /\$ failing-cmd\n\t\t\[ERROR\]/.test(erroredMid.content) && !/prompt above\n\t\t\[/.test(erroredMid.content), JSON.stringify(erroredMid.content))
+
 // A `%` runs everything below it first (bottom-to-top), then collapses that completed run —
 // deleting those lines and itself — leaving only the work above it.
 const collapsed = drain('alpha\n\t: newest\n\t%\n\t: old one\n\t$ old cmd\n')
