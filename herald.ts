@@ -162,6 +162,39 @@ export interface MacroStep {
 	text: string
 	isCmd: boolean
 }
+
+// Optional YAML file of widgets: `name: { interval: <ms>, commands: [<shell cmd>, …] }`. An
+// `&name` line in a `.herald` file is a live status display — herald reruns its commands every
+// `interval` ms and mirrors their combined stdout back into the file as `| `-prefixed lines
+// indented below the `&name` line. Unlike a macro, a widget never drains: it isn't a queue item.
+const WIDGETS_FILE = process.env.HERALD_WIDGETS ? resolve(process.env.HERALD_WIDGETS) : join(HERE, 'herald-widgets.yaml')
+export interface Widget {
+	interval: number
+	commands: string[]
+}
+export type Widgets = Record<string, Widget>
+const WIDGET_MIN_INTERVAL = 1000 // the tick floor — a shorter interval can only refresh per tick
+// Load the `&name`→widget map, tolerating a missing/empty/malformed file. A valid entry is an
+// object with a non-empty string-array `commands`; `interval` defaults to 10s and is floored at
+// the tick cadence (a widget can't refresh faster than herald ticks).
+export function loadWidgets(): Widgets {
+	try {
+		const parsed = YAML.parse(readFileSync(WIDGETS_FILE, 'utf8'))
+		if (!parsed || typeof parsed !== 'object') return {}
+		const out: Widgets = {}
+		for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+			if (!v || typeof v !== 'object') continue
+			const cmds = (v as { commands?: unknown }).commands
+			if (!Array.isArray(cmds) || !cmds.every((c) => typeof c === 'string') || cmds.length === 0) continue
+			const raw = (v as { interval?: unknown }).interval
+			const interval = Math.max(WIDGET_MIN_INTERVAL, typeof raw === 'number' && raw > 0 ? raw : 10000)
+			out[k] = { interval, commands: cmds as string[] }
+		}
+		return out
+	} catch {
+		return {}
+	}
+}
 // A `@<name> [args…]` line (any indent) is a macro call: one queue item whose body expands
 // IN MEMORY to a sequence of steps run one at a time, while the file keeps the `@name` line
 // and gets a single overall marker. `{0}`,`{1}`,… are the positional args (0-based;
@@ -169,6 +202,10 @@ export interface MacroStep {
 // is blank. Braces avoid clashing with herald's own `$N`/`:N` lane sigils. A name char must
 // follow the `@`, so a body line like `@@@…` never matches.
 const MACRO_RE = /^([ \t]*)@([\w-]+)(?:[ \t]+(.*\S))?[ \t]*$/
+// A `&<name> [args…]` line (any indent) is a widget call — same shape as a macro call, but it
+// resolves against the widget map and produces live output instead of queue steps. A name char
+// must follow the `&`; the rest is args and/or an inline-output suffix (see the parse handler).
+const WIDGET_RE = /^&([\w-]+)(.*)$/
 const macroArgs = (s: string): string[] => (s.match(/"[^"]*"|\S+/g) ?? []).map((a) => (a.startsWith('"') && a.endsWith('"') ? a.slice(1, -1) : a))
 const fillArgs = (text: string, args: string[]): string => text.replace(/\{\*\}/g, args.join(' ')).replace(/\{(\d+)\}/g, (_, d) => args[+d] ?? '')
 // Expand a macro body into steps, in RUN order: fill args, drop blank and `#` comment lines,
@@ -299,6 +336,26 @@ interface Session {
 	// merged session; buildOps still runs on each part, and the tick syncs session-level
 	// markers (desiredSession / showNow) back to the primary part. Undefined otherwise.
 	parts?: Session[]
+	// The `&name` widget calls in this session's block. Kept separate from `prompts` so the
+	// drain never touches them — a widget is a live display, not a queue item.
+	widgets: WidgetItem[]
+}
+
+// A parsed `&name [args]` line plus its current output. Single-line output renders inline on the
+// widget line as `&name[ args]: <output>` (`inline` true); multi-line output renders as a `| `
+// block one indent below, spanning `outputStartIdx..outputEndIdx` (`hasOutput` true). `call` is
+// the indent-less `&name[ args]` text (no inline suffix), so a rewrite preserves name and args.
+// The tick reruns the widget's commands every `interval` ms and rewrites whichever form fits.
+export interface WidgetItem {
+	name: string
+	args: string[]
+	call: string
+	inline: boolean
+	lineIdx: number
+	indent: string
+	outputStartIdx: number
+	outputEndIdx: number
+	hasOutput: boolean
 }
 
 // A prompt line starts with `prompt:` or the shorthand `:`. A run of colons or a
@@ -329,7 +386,7 @@ const clearAttention = (s: Session) => {
 	if (isAttention(s.desiredSession)) s.desiredSession = null
 }
 
-export function parse(content: string, aliases: Aliases = {}, macros: Macros = {}): { lines: string[]; sessions: Session[] } {
+export function parse(content: string, aliases: Aliases = {}, macros: Macros = {}, widgets: Widgets = {}): { lines: string[]; sessions: Session[] } {
 	const lines = content.split('\n')
 	// The whole file is the sessions region; keep your backlog/footer in other
 	// files. Blank lines are skipped, so nothing else is preserved verbatim.
@@ -338,6 +395,9 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 	// The prompt/command a deeper-indented line would continue. Set right after a `:`/`$`
 	// line, cleared by anything else (header, marker, barrier, blank-separated item).
 	let lastPrompt: Prompt | null = null
+	// The widget a deeper `| ` line would extend as output. Set right after an `&name` line,
+	// cleared by anything that isn't one of its output lines (mirrors lastPrompt).
+	let lastWidget: WidgetItem | null = null
 	// The enclosing repo/worktree stack (by indent). Queue items attach to the deepest one
 	// they sit under; a non-sigil line opens a new worktree container. Reset per header.
 	let containers: { indent: number; session: Session }[] = []
@@ -354,6 +414,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		if (leadingBang) line = tabs + afterTabs.replace(/^!\s*/, '')
 		if (tabs.length === 0) {
 			lastPrompt = null
+			lastWidget = null
 			// A column-0 `#` is a plain comment (it sits between sessions, so there is no
 			// queue to halt): ignored and preserved verbatim, like a blank line. It also
 			// closes the current session block, so an indented line beneath it (e.g. a
@@ -383,6 +444,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				indent: '',
 				showNow,
 				showNowFired: false,
+				widgets: [],
 			}
 			sessions.push(cur)
 			containers = [{ indent: 0, session: cur }]
@@ -410,7 +472,22 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 			}
 			continue
 		}
+		// A `| ` line below an `&name` widget is one line of its live output block (herald
+		// writes it there; a human normally wouldn't). It's inert — never a queue item — and
+		// its range is tracked so the tick can rewrite it with fresh output. A non-`|` line ends
+		// the block. This is checked before the container routing below so output that happens to
+		// look like a prompt/worktree (`> …`, `feat`) is never misparsed as queue content.
+		if (lastWidget && CONT_RE.test(t)) {
+			if (!lastWidget.hasOutput) {
+				lastWidget.outputStartIdx = i
+				lastWidget.hasOutput = true
+			}
+			lastWidget.outputEndIdx = i
+			containers[containers.length - 1].session.lastChildIdx = i
+			continue
+		}
 		lastPrompt = null
+		lastWidget = null
 		// Route this line to its container — the deepest repo/worktree it sits under. A
 		// deeper indent nests; a shallower/equal one pops back out to an ancestor.
 		const d = tabs.length
@@ -419,6 +496,32 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		// Track the deepest container's last child too, so a worktree's session marker (e.g.
 		// [NO DIR …]) is inserted below the worktree's own block, not the repo's.
 		target.lastChildIdx = i
+		const widgetMatch = t.match(WIDGET_RE)
+		if (widgetMatch && widgets[widgetMatch[1]] !== undefined) {
+			// An `&name [args]` call: a live display, not a queue item. The tick reruns its commands
+			// on an interval and rewrites the output — inline as `&name: …` for a single line, or a
+			// `| ` block below for several. Split an optional inline-output suffix (` : <output>`) off
+			// the rest here: the `: ` delimiter can't clash with the name and rarely with an arg, and
+			// whatever follows is herald's own output, overwritten each run.
+			const rest = widgetMatch[2]
+			const ci = rest.indexOf(': ')
+			const callArgs = ci >= 0 ? rest.slice(0, ci) : rest
+			const argsStr = callArgs.trim()
+			const item: WidgetItem = {
+				name: widgetMatch[1],
+				args: argsStr ? macroArgs(argsStr) : [],
+				call: `&${widgetMatch[1]}${callArgs}`.trimEnd(),
+				inline: ci >= 0,
+				lineIdx: i,
+				indent: tabs,
+				outputStartIdx: i,
+				outputEndIdx: i,
+				hasOutput: false,
+			}
+			target.widgets.push(item)
+			lastWidget = item
+			continue
+		}
 		const macroMatch = t.match(MACRO_RE)
 		if (macroMatch && macros[macroMatch[2]] !== undefined) {
 			// A `@name [args]` call: one item whose body expands in memory to `steps`. The
@@ -586,6 +689,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				indent: line.slice(0, line.length - line.trimStart().length),
 				showNow,
 				showNowFired: false,
+				widgets: [],
 			}
 			sessions.push(wt)
 			containers.push({ indent: d, session: wt })
@@ -668,6 +772,42 @@ export function buildOps(sessions: Session[], skip?: Set<Session>): Op[] {
 	return ops
 }
 
+// Render a widget's captured output into the `| `-prefixed lines that sit one indent below its
+// `&name` line: each output line becomes `<indent>\t| <text>` (an empty line is a bare
+// `<indent>\t|`), so arbitrary content — even lines that look like sigils — round-trips as inert.
+// Empty output produces no lines at all.
+export function widgetOutputLines(item: WidgetItem, output: string): string[] {
+	if (output === '') return []
+	return output.split('\n').map((l) => (l === '' ? `${item.indent}\t|` : `${item.indent}\t| ${l}`))
+}
+
+// Ops to bring each widget's rendered output in line with fresh output. `outputs` maps a widget
+// to its new raw output; a widget absent from the map (not due to rerun this tick) is left alone.
+// Single-line output renders inline on the widget line (`&name: …`); anything else renders as a
+// `| ` block below and the line reverts to a bare `&name`. Reconciles both the widget line and the
+// block, and emits nothing when the display is already what it should be (so an unchanged widget
+// never rewrites the file). Pure, so it's unit-testable.
+export function buildWidgetOps(sessions: Session[], lines: string[], outputs: Map<WidgetItem, string>): Op[] {
+	const ops: Op[] = []
+	for (const s of sessions) {
+		for (const w of s.widgets) {
+			if (!outputs.has(w)) continue
+			const raw = outputs.get(w)!
+			const outLines = raw === '' ? [] : raw.split('\n')
+			const inline = outLines.length === 1
+			const desiredLine = `${w.indent}${w.call}${inline ? `: ${outLines[0]}` : ''}`
+			const desiredBlock = inline ? [] : outLines.map((l) => (l === '' ? `${w.indent}\t|` : `${w.indent}\t| ${l}`))
+			if (lines[w.lineIdx] !== desiredLine) ops.push({ pos: w.lineIdx, type: 'replace', text: desiredLine })
+			const current = w.hasOutput ? lines.slice(w.outputStartIdx, w.outputEndIdx + 1) : []
+			if (!(current.length === desiredBlock.length && current.every((l, idx) => l === desiredBlock[idx]))) {
+				if (w.hasOutput) for (let ln = w.outputStartIdx; ln <= w.outputEndIdx; ln++) ops.push({ pos: ln, type: 'delete' })
+				if (desiredBlock.length) ops.push({ pos: w.lineIdx, type: 'insert', text: desiredBlock.join('\n') })
+			}
+		}
+	}
+	return ops
+}
+
 export function applyOps(lines: string[], ops: Op[]): string[] {
 	const out = [...lines]
 	const key = (o: Op) => o.pos + (o.type === 'insert' ? 0.5 : 0)
@@ -707,7 +847,9 @@ export function vacatedSessions(sessions: Session[], liveLabels: Set<string>): {
 	for (const s of [...ordered].reverse()) {
 		const kids = children.get(s)!
 		liveSub.set(s, liveLabels.has(s.label) || kids.some((k) => liveSub.get(k)!))
-		if (s.prompts.length === 0 && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
+		// A widget makes a session "occupied" the same way a prompt does — a live status
+		// display with no queued work must not be reaped out from under its `&name` line.
+		if (s.prompts.length === 0 && s.widgets.length === 0 && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
 	}
 	const tops = ordered.filter((s) => removed.has(s) && !(parent.get(s) && removed.has(parent.get(s)!)))
 	return { tops, all: removed }
@@ -858,6 +1000,9 @@ interface RtEntry {
 	// worktree up alongside its tmux session.
 	worktreeDir?: string
 	worktreeBase?: string
+	// Per-widget refresh gate, keyed `name#occurrence` within this label: when it last ran, so a
+	// widget only reruns once its `interval` has elapsed (survives restarts via controller.json).
+	widgets?: Record<string, { lastRun: number }>
 }
 type Rt = Record<string, RtEntry>
 
@@ -1088,7 +1233,7 @@ function viewCmd(label: string): string {
 	// `env` so the assignments work regardless of the pane's login shell (fish has no
 	// `VAR=val cmd` form); values are single-quoted for the shell that types the line.
 	const env: string[] = [`HERALD_DIR=${q(CONTROL_DIR)}`]
-	for (const k of ['HERALD_FILE', 'HERALD_ALIASES', 'HERALD_MACROS', 'HERALD_DEV_DIR'] as const) {
+	for (const k of ['HERALD_FILE', 'HERALD_ALIASES', 'HERALD_MACROS', 'HERALD_WIDGETS', 'HERALD_DEV_DIR'] as const) {
 		if (process.env[k]) env.push(`${k}=${q(process.env[k]!)}`)
 	}
 	return `env ${env.join(' ')} ${q(TSX_BIN)} ${q(TUI_PATH)} --session ${q(label)}`
@@ -1242,6 +1387,40 @@ async function sendCmd(label: string, text: string, n = 1) {
 	// The command's exit status is written to its done-file by the per-shell hook
 	// in the shell window (see herald-{fish,bash,zsh}.*), so we type it verbatim.
 	await typeInto(pane, text)
+}
+
+// Strip terminal escape sequences (SGR colors, cursor moves, OSC 8 hyperlinks, etc.) and stray
+// control chars from captured command output, so a widget's `| ` lines are plain, editor-safe
+// text. Real content — including UTF-8 glyphs like ✓/✗ and an OSC link's visible label — survives;
+// only the escapes and lone C0 controls (bar tab/newline) are removed.
+export const stripAnsi = (s: string): string =>
+	s
+		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (hyperlinks, window titles): ESC ] … BEL|ST
+		.replace(/\x1b[P^_X][^\x1b]*(?:\x1b\\)?/g, '') // DCS/PM/APC/SOS strings: ESC P|^|_|X … ST
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '') // CSI (colors, cursor moves): ESC [ … final byte
+		.replace(/\x1b[@-Z\\-_]/g, '') // any remaining single-char C1 escape
+		.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '') // stray C0 controls / DEL (keep \t and \n)
+
+// Run a widget's commands in `dir` (or the control dir if it doesn't exist yet), in order, and
+// join their stdout into one output blob — falling back to stderr for a command that produced no
+// stdout — with terminal escapes stripped so it renders as plain text. Best-effort: each command
+// runs in `fish -c` (so the user's fish functions and abbreviations resolve) with a 15s cap, and a
+// failing or hanging command degrades to a short `[error: …]` line rather than stalling the tick.
+async function runWidget(def: Widget, args: string[], dir: string): Promise<string> {
+	const cwd = existsSync(dir) ? dir : CONTROL_DIR
+	const clean = (x: string) => stripAnsi(x).replace(/^\n+/, '').replace(/\s+$/, '')
+	const parts: string[] = []
+	for (const cmd of def.commands) {
+		const filled = fillArgs(cmd, args)
+		try {
+			const r = await $({ cwd, nothrow: true, quiet: true, timeout: '15s' })`fish -c ${filled}`
+			const out = clean(r.stdout ?? '') || clean(r.stderr ?? '')
+			if (out !== '') parts.push(out)
+		} catch {
+			parts.push(`[error: ${filled}]`)
+		}
+	}
+	return parts.join('\n')
 }
 
 // Create lane `n`'s pane of `kind` as a new window, wired for completion reporting:
@@ -1869,6 +2048,7 @@ async function tick(rt: Rt) {
 	const live = await listTmux()
 	const aliases = loadAliases()
 	const macros = loadMacros()
+	const widgets = loadWidgets()
 	// Read + parse every `.herald` file. Each file's sessions carry line indices into
 	// that file's own `lines`, so markers are written back to the file they came from.
 	const files = controlFiles()
@@ -1881,7 +2061,7 @@ async function tick(rt: Rt) {
 		// Macros expand IN MEMORY inside parse (the `@name` line stays in the file); only the
 		// single overall marker is ever written back.
 		const content = readFileSync(path, 'utf8')
-		const { lines, sessions } = parse(content, aliases, macros)
+		const { lines, sessions } = parse(content, aliases, macros, widgets)
 		return { path, content, lines, sessions, mtime }
 	})
 	// Merge into one global session list; the first file (alphabetical) to claim a
@@ -2167,6 +2347,48 @@ async function tick(rt: Rt) {
 		s.parts[0].showNowFired = s.showNowFired
 	}
 
+	// ---- widget pass: rerun each due `&name` widget and mirror its output back into the file ----
+	// A widget is a live display, not a queue item: every `interval` ms herald reruns its commands
+	// and rewrites the `| ` block below the `&name` line. Runs happen concurrently and are gated per
+	// widget by `rt[label].widgets[key].lastRun`; the resulting ops merge into the per-file rewrite
+	// below (so they respect the same mid-tick defer, and an unchanged display writes nothing).
+	const widgetOpsByPath = new Map<string, Op[]>()
+	if (!DRY) {
+		const now = Date.now()
+		const seen = new Map<string, Map<string, number>>() // label → (widget name → occurrence), for a stable run key
+		const due: { control: Control; item: WidgetItem; def: Widget; key: string; label: string; dir: string }[] = []
+		for (const c of controls) {
+			for (const s of c.sessions) {
+				for (const w of s.widgets) {
+					const def = widgets[w.name]
+					if (!def) continue
+					const perLabel = seen.get(s.label) ?? new Map<string, number>()
+					seen.set(s.label, perLabel)
+					const occ = perLabel.get(w.name) ?? 0
+					perLabel.set(w.name, occ + 1)
+					const key = `${w.name}#${occ}`
+					if (now - (rt[s.label]?.widgets?.[key]?.lastRun ?? 0) < def.interval) continue
+					due.push({ control: c, item: w, def, key, label: s.label, dir: s.dir })
+				}
+			}
+		}
+		const outputsByPath = new Map<string, Map<WidgetItem, string>>()
+		await Promise.all(
+			due.map(async (d) => {
+				const output = await runWidget(d.def, d.item.args, d.dir)
+				const entry = (rt[d.label] ??= { starting: true, startedAt: 0, lanes: {} })
+				;(entry.widgets ??= {})[d.key] = { lastRun: now }
+				const m = outputsByPath.get(d.control.path) ?? new Map<WidgetItem, string>()
+				m.set(d.item, output)
+				outputsByPath.set(d.control.path, m)
+			}),
+		)
+		for (const c of controls) {
+			const m = outputsByPath.get(c.path)
+			if (m) widgetOpsByPath.set(c.path, buildWidgetOps(c.sessions, c.lines, m))
+		}
+	}
+
 	// If the user edited any `.herald` file while we computed, defer: skip writes AND
 	// actions so nothing (e.g. a queued prompt) fires against a stale view.
 	for (const c of controls) {
@@ -2182,7 +2404,7 @@ async function tick(rt: Rt) {
 	// block deleted; the next tick reaps the vacated tmux session (and worktree) via reapTargets.
 	for (const c of controls) {
 		const { tops, all } = vacatedSessions(c.sessions, live)
-		const ops = [...buildOps(c.sessions, all), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? [])]
+		const ops = [...buildOps(c.sessions, all), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? []), ...(widgetOpsByPath.get(c.path) ?? [])]
 		const newContent = applyOps(c.lines, ops).join('\n')
 		if (newContent !== c.content) atomicWrite(c.path, newContent)
 	}

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho, vacatedSessions, vacateOps } from './herald'
+import { aliasWorktree, applyOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 
 let failures = 0
@@ -1096,6 +1096,77 @@ check(
 
 	// An unchanged worktree view is a no-op round-trip.
 	check('a worktree view round-trips with no changes', planSessionWriteback([W], 'repo-feat', wtView, '/tmp').length === 0)
+}
+
+// ---- widgets: `&name` live displays ------------------------------------------------------
+{
+	const widgets: Widgets = { pr: { interval: 10000, commands: ['echo hi'] } }
+	// A defined `&name` parses to a widget on its session — never a prompt/command/worktree.
+	const w1 = parse('repo\n\t&pr\n', {}, {}, widgets)
+	const s1 = w1.sessions[0]
+	check('&name parses as a widget, not a queue item', s1.widgets.length === 1 && s1.prompts.length === 0 && s1.widgets[0].name === 'pr')
+	check('a fresh widget has no output range yet', s1.widgets[0].hasOutput === false)
+
+	// An undefined `&name` is left to normal parsing (it becomes a worktree container), so a typo
+	// never silently vanishes as an inert widget.
+	const w2 = parse('repo\n\t&nope\n', {}, {}, widgets)
+	check('an undefined &name is not treated as a widget', w2.sessions[0].widgets.length === 0)
+
+	// The `| ` lines below `&pr` are its output block, tracked by range — never parsed as prompts,
+	// even when the content looks like a sigil (`> …`) or a worktree header (`feat`).
+	const w3 = parse('repo\n\t&pr\n\t\t| #42 open\n\t\t| > looks like a prompt\n\t: real prompt\n', {}, {}, widgets)
+	const wi = w3.sessions[0].widgets[0]
+	check('widget output block is captured by range', wi.hasOutput && wi.outputStartIdx === 2 && wi.outputEndIdx === 3)
+	check('output that looks like a prompt is not a queue item', w3.sessions[0].prompts.length === 1 && w3.sessions[0].prompts[0].text === 'real prompt')
+
+	// Rendering: each output line is `| `-prefixed one indent below the widget; empty output → none.
+	check('widgetOutputLines prefixes and indents', widgetOutputLines(wi, 'a\nb').join('\n') === '\t\t| a\n\t\t| b')
+	check('empty output renders no lines', widgetOutputLines(wi, '').length === 0)
+
+	// Single-line output renders INLINE on the widget line as `&pr: <output>`, no block below.
+	const fresh = parse('repo\n\t&pr\n', {}, {}, widgets)
+	const inlineOps = buildWidgetOps(fresh.sessions, fresh.lines, new Map([[fresh.sessions[0].widgets[0], '#42 open']]))
+	check('single-line output renders inline on the &pr line', applyOps(fresh.lines, inlineOps).join('\n') === 'repo\n\t&pr: #42 open\n')
+
+	// Multi-line output renders as a `| ` block below, leaving the widget line bare.
+	const blockOps = buildWidgetOps(fresh.sessions, fresh.lines, new Map([[fresh.sessions[0].widgets[0], 'line1\nline2']]))
+	check('multi-line output renders as a | block below &pr', applyOps(fresh.lines, blockOps).join('\n') === 'repo\n\t&pr\n\t\t| line1\n\t\t| line2\n')
+
+	// An inline widget re-parses to its call (name/args), output stripped back off; same output = no-op.
+	const reparsed = parse('repo\n\t&pr: #42 open\n', {}, {}, widgets)
+	const rw = reparsed.sessions[0].widgets[0]
+	check('an inline widget re-parses to name + inline flag', rw.name === 'pr' && rw.inline === true && rw.call === '&pr')
+	check('re-running an inline widget with the same output is a no-op', buildWidgetOps(reparsed.sessions, reparsed.lines, new Map([[rw, '#42 open']])).length === 0)
+	check('a changed inline output rewrites the line', applyOps(reparsed.lines, buildWidgetOps(reparsed.sessions, reparsed.lines, new Map([[rw, '#42 merged']]))).join('\n') === 'repo\n\t&pr: #42 merged\n')
+
+	// Transitions: inline → block (output grew) and block → inline (output shrank) both reconcile.
+	check('inline widget grows into a block', applyOps(reparsed.lines, buildWidgetOps(reparsed.sessions, reparsed.lines, new Map([[rw, 'a\nb']]))).join('\n') === 'repo\n\t&pr\n\t\t| a\n\t\t| b\n')
+	const block = parse('repo\n\t&pr\n\t\t| a\n\t\t| b\n', {}, {}, widgets)
+	check('block widget shrinks back to inline', applyOps(block.lines, buildWidgetOps(block.sessions, block.lines, new Map([[block.sessions[0].widgets[0], 'just one']]))).join('\n') === 'repo\n\t&pr: just one\n')
+
+	// Inline output survives args: `&pr 42` → `&pr 42: <output>`, re-parsed args intact.
+	const withArgs = parse('repo\n\t&pr 42\n', {}, {}, widgets)
+	check('inline output preserves the widget args', applyOps(withArgs.lines, buildWidgetOps(withArgs.sessions, withArgs.lines, new Map([[withArgs.sessions[0].widgets[0], 'ok']]))).join('\n') === 'repo\n\t&pr 42: ok\n')
+	check('an inline widget with args re-parses its args', JSON.stringify(parse('repo\n\t&pr 42: ok\n', {}, {}, widgets).sessions[0].widgets[0].args) === JSON.stringify(['42']))
+
+	// Emptied output reverts to a bare `&pr` line (no inline suffix, no block).
+	const have = parse('repo\n\t&pr\n\t\t| old\n', {}, {}, widgets)
+	const emptyOps = buildWidgetOps(have.sessions, have.lines, new Map([[have.sessions[0].widgets[0], '']]))
+	check('emptied output reverts to a bare &pr line', applyOps(have.lines, emptyOps).join('\n') === 'repo\n\t&pr\n')
+
+	// A widget makes its session non-vacatable even with no prompts (a live display isn't reaped).
+	const vac = parse('repo\n\t&pr\n', {}, {}, widgets)
+	check('a widget-only session is not vacated', vacatedSessions(vac.sessions, new Set(['repo'])).all.size === 0)
+
+	// stripAnsi drops SGR colors and OSC 8 hyperlinks (real ghprs output) but keeps the visible
+	// text, the link label, and UTF-8 glyphs — so widget output renders in a plain text editor.
+	const ESC = '\x1b'
+	const colored = `${ESC}[38;2;240;136;62m  OPEN  ${ESC}[m`
+	check('stripAnsi removes SGR color codes', stripAnsi(colored) === '  OPEN  ')
+	const linked = `${ESC}]8;;https://example.com/pr/79${ESC}\\#79${ESC}]8;;${ESC}\\`
+	check('stripAnsi keeps an OSC 8 hyperlink label, drops the escapes', stripAnsi(linked) === '#79')
+	check('stripAnsi keeps ✓/✗ glyphs and tabs/newlines', stripAnsi(`${ESC}[32m✓${ESC}[m\tCI\n✗ x`) === '✓\tCI\n✗ x')
+	check('stripAnsi drops stray carriage returns', stripAnsi('a\r\nb') === 'a\nb')
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)

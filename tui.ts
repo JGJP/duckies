@@ -18,7 +18,7 @@ import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileS
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { diff3Merge } from 'node-diff3'
-import { CONTROL_DIR, controlFiles, loadAliases, loadMacros, parse } from './herald'
+import { CONTROL_DIR, controlFiles, loadAliases, loadMacros, loadWidgets, parse } from './herald'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // `--session <label>` runs a compiled session view: instead of one file, the buffer is this
@@ -85,6 +85,7 @@ export interface HeraldFile {
 }
 const ALIASES = loadAliases()
 const MACROS = loadMacros()
+const WIDGETS = loadWidgets()
 // Read every control file herald manages (the same set, resolved from the same env).
 const readControlFiles = (): HeraldFile[] =>
 	controlFiles()
@@ -103,7 +104,7 @@ const readControlFiles = (): HeraldFile[] =>
 export function viewBlocks(files: HeraldFile[], label: string): { path: string; start: number; end: number }[] {
 	const out: { path: string; start: number; end: number }[] = []
 	for (const f of files) {
-		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS)
+		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS, WIDGETS)
 		for (const s of sessions.filter((s) => (s.indent ?? '') === '' && s.label === label).sort((a, b) => a.headerIdx - b.headerIdx)) {
 			out.push({ path: f.path, start: s.headerIdx, end: s.lastChildIdx })
 		}
@@ -130,7 +131,7 @@ export function viewParts(files: HeraldFile[], label: string): ViewPart[] {
 	const top: ViewPart[] = []
 	const wt: ViewPart[] = []
 	for (const f of files) {
-		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS)
+		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS, WIDGETS)
 		const tops = sessions.filter((s) => (s.indent ?? '') === '')
 		for (const s of sessions.filter((s) => s.label === label).sort((a, b) => a.headerIdx - b.headerIdx)) {
 			if ((s.indent ?? '') === '') top.push({ path: f.path, start: s.headerIdx, end: s.lastChildIdx, header: null })
@@ -161,7 +162,7 @@ export function compileSession(files: HeraldFile[], label: string): string[] {
 // session's blocks, so these are exactly the blocks to write back — matching by structure, not
 // label, so renaming the header still round-trips instead of dropping the block.
 function bufferBlocks(buffer: string[]): string[][] {
-	const { sessions } = parse(buffer.join('\n'), ALIASES, MACROS)
+	const { sessions } = parse(buffer.join('\n'), ALIASES, MACROS, WIDGETS)
 	return sessions
 		.filter((s) => (s.indent ?? '') === '')
 		.sort((a, b) => a.headerIdx - b.headerIdx)
@@ -232,6 +233,7 @@ const C = {
 	cmdText: fg(51, 153, 255),
 	show: '\x1b[38;5;170m', // keyword-ish accent — no scheme rule to match
 	macro: fg(166, 223, 149), // #a6df95, no background (entity.name.function.macro)
+	widget: fg(102, 217, 224), // #66d9e0, no background (entity.name.function.widget) — a live `&name` display
 	exec: fgbg(0, 0, 0, 255, 121, 26), // black on #ff791a (constant.language.executing)
 	done: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (markup.inserted.done)
 	attn: fgbg(0, 0, 0, 255, 204, 0), // black on #ffcc00 (invalid.deprecated.attention)
@@ -283,6 +285,10 @@ function colorsFor(line: string): (string | null)[] {
 	if (/^@[\w-]+(?:\s.*)?$/.test(body)) {
 		// Macro call — a name char must follow the `@` (so a `@@@…` body line stays default).
 		fill(lead, n, C.macro)
+	} else if (/^&[\w-]+(?:[\s:].*)?$/.test(body)) {
+		// Widget call — a live `&name` display, styled like a macro but its own hue. Matches the
+		// inline-output form too (`&name: …`), so the whole line reads as one widget unit.
+		fill(lead, n, C.widget)
 	} else if ((m = low.match(/^(prompt)?:+\d*/))) {
 		fill(lead, lead + m[0].length, C.promptSigil)
 		fill(lead + m[0].length, n, C.promptText)

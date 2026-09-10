@@ -11,6 +11,10 @@
 			"foreground": "#a6df95",
 		},
 		{
+			"scope": "entity.name.function.widget.herald",
+			"foreground": "#66d9e0",
+		},
+		{
 			"scope": "keyword.operator.command.herald, string.unquoted.command.herald",
 			"foreground": "#3399ff",
 		},

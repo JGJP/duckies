@@ -618,12 +618,49 @@ core-iac
 spaces), `{*}` is all of them space-joined, and a missing one expands blank. Braces are
 used (not `$1`) so a placeholder never clashes with a `$2`/`:2` lane sigil inside the block.
 
+## Widgets (`herald-widgets.yaml`)
+
+Optional. A **live status display**, defined like a macro but with a **list of commands** and
+a refresh **interval**. An `&name` line on its own in a `.herald` block reruns those commands
+every `interval` ms and mirrors their combined stdout back into the file, indented below the
+line as `| `-prefixed rows:
+
+```yaml
+pr:
+  interval: 10000
+  commands:
+    - gh pr view --json title,state,reviewDecision --jq '.title + "  " + .state'
+    - gh pr checks
+```
+
+Drop `&pr` under a session and herald keeps its output fresh. **Single-line** output renders
+**inline** on the widget line; **multi-line** output renders as a `| ` block below it:
+
+```
+myrepo
+	&pr: Add widgets  OPEN  ✓ all checks passing
+	&deploy
+		| staging   ✓ live   v1.2.3
+		| prod      ⏳ rolling out
+```
+
+Unlike a macro, a widget is **not** a queue item — it never drains, never blocks a lane, and
+gets no `[DONE]` marker; it's just a readout. Commands run in the session's dir via `fish -c`
+(each capped at 15s), and the output is rewritten only when it actually changes. Because the
+block form is `| `-prefixed and terminal escapes (colors, hyperlinks) are stripped, arbitrary
+output — even lines that look like `> prompt` or a worktree header — round-trips as inert plain
+text. The refresh interval is floored at the ~1s tick.
+
+**Arguments** work exactly like macros: `&pr 2500` fills `{0}`/`{*}` in the commands. The
+widgets file is per-machine (gitignored), like `herald-aliases.yaml` / `herald-macros.yaml`.
+
 ## Env overrides
 
 - `HERALD_DIR` — scan a different directory for `*.herald` files instead of the repo dir.
 - `HERALD_FILE` — single-file mode: watch exactly this one file (ignores the `*.herald` scan).
 - `HERALD_ALIASES` — read aliases from a different file instead of `./herald-aliases.yaml`.
 - `HERALD_MACROS` — read macros from a different file instead of `./herald-macros.yaml`.
+- `HERALD_WIDGETS` — read widgets from a different file instead of `./herald-widgets.yaml`.
 - `HERALD_DEV_DIR` — where a bare session name resolves (`<dir>/<name>`); default `~/_dev`.
 - `HERALD_AGENT_CMD` — the command launched in each claude pane; default `claude` (point it at
   a wrapper or a different agent CLI).

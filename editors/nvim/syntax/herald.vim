@@ -14,6 +14,10 @@ syntax match heraldComment /^\s*#.*$/
 " must follow the `@`, so a `@@@…` body line never matches.
 syntax match heraldMacro /^\s*@[0-9A-Za-z_-]\+\%(\s.*\)\?$/
 
+" Widget call: a `&name [args]` line — a live status display the controller reruns on an
+" interval, mirroring its output below as `| ` lines. A name char must follow the `&`.
+syntax match heraldWidget /^\s*&[0-9A-Za-z_-]\+\%([:[:space:]].*\)\?$/
+
 " Session header: a column-0 (non-tab, non-`#`) line. A leading `!` = "show it now"
 " (matched by heraldShowNow below).
 syntax match heraldHeader /^[^\t#].*$/
@@ -26,7 +30,7 @@ syntax match heraldNote /^\t\+ *->.*$/
 " Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
 " show/marker/note rows so only true labels match. Styled like a header (Identifier); a
 " leading `!` ("show now") is matched by heraldShowNow below.
-syntax match heraldWorktree /\c^\t\+ *\%([#@:$[|%]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
+syntax match heraldWorktree /\c^\t\+ *\%([#@&:$[|%]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
 
 " Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane. Only the sigil is
 " highlighted (\zs starts the match after the indent); the text stays normal.
@@ -78,5 +82,7 @@ highlight default heraldShowNow guifg=#000000 guibg=#ffffff ctermfg=0 ctermbg=15
 highlight default heraldClear guifg=#000000 guibg=#ffe600 ctermfg=0 ctermbg=226
 " Macro calls: black on LINE green (#06C755); `default` so a colorscheme can override.
 highlight default heraldMacro guifg=#000000 guibg=#06c755 ctermfg=black ctermbg=41
+" Widget calls: cyan fg (#66d9e0), matching the tui/Sublime hue; `default` so it can override.
+highlight default heraldWidget guifg=#66d9e0 ctermfg=80
 
 let b:current_syntax = 'herald'

@@ -24,6 +24,13 @@
 			}
 		},
 		{
+			"comment": "Widget call: a `&name [args]` line — a live status display the controller reruns on an interval, mirroring its output below as `| ` lines. A name char must follow the `&`.",
+			"match": "^[ \\t]*(&[\\w-]+(?:[ \\t:].*)?)$",
+			"captures": {
+				"1": { "name": "entity.name.function.widget.herald" }
+			}
+		},
+		{
 			"comment": "Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane/pane.",
 			"match": "^\\t+ *((?i:prompt)?:+\\d*)(.*)$",
 			"captures": {

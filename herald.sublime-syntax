@@ -34,6 +34,13 @@ contexts:
       captures:
         1: entity.name.function.macro.herald
 
+    # Widget call: a `&name [args]` line — a live status display the controller reruns on an
+    # interval, mirroring its output below as `| ` lines (see herald-widgets.yaml). Same shape as
+    # a macro call, its own hue via the color scheme. A name char must follow the `&`.
+    - match: '^[ \t]*(&[\w-]+(?:[ \t:].*)?)$'
+      captures:
+        1: entity.name.function.widget.herald
+
     # Prompt: `prompt:` or the `:` shorthand. A run of colons or a trailing number
     # (`::`/`:2`) selects the lane/pane. The whole line is one prompt scope (sigil +
     # text) so it can be styled as a single unit. A leading `!` reveals this item's pane
