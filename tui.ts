@@ -1300,7 +1300,7 @@ function sync() {
 	if (!modified()) {
 		// clean reload — keep the cursor on the same logical line
 		const anchor = lines[cy] ?? ''
-		lines = theirs
+		lines = theirs.slice()
 		cy = Math.max(0, Math.min(nearestIndex(lines, anchor, cy), lines.length - 1))
 	} else {
 		const anchor = lines[cy] ?? ''
@@ -1310,7 +1310,11 @@ function sync() {
 			cy = Math.max(0, Math.min(nearestIndex(lines, anchor, cy), lines.length - 1))
 		}
 	}
-	base = theirs
+	// `base` must never share its array with `lines`: the editor mutates `lines` in place
+	// (splice in `o`, `lines[cy] = …` while typing), and an aliased `base` would mutate in
+	// lockstep, leaving `modified()` permanently false — so the next external write would
+	// clean-reload over your unsaved edit. Keep them independent copies.
+	base = theirs.slice()
 	clampCursor()
 	render()
 }
