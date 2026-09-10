@@ -253,6 +253,17 @@ const clr2 = parse('alpha\n\t: lane1 keep\n\t%2\n\t:2 lane2 gone\n\t$ lane1 keep
 clr2.sessions[0].prompts.find((p) => p.isClear)!.fired = true
 const clr2Out = applyOps(clr2.lines, buildOps(clr2.sessions)).join('\n')
 check('a fired `%2` deletes only lane 2 below it', !clr2Out.includes('lane2 gone') && clr2Out.includes('lane1 keep') && clr2Out.includes('lane1 keep too'))
+// A `%` added under an already-finished run (the frontier now sits *above* it) must still fire,
+// even though the climbing drain never revisits it — planQueue checks it independently.
+const strandedClr = parse('alpha\n\t: top\n\t\t[DONE]\n\t%\n\t: doneB\n\t\t[DONE]\n\t: doneA\n\t\t[DONE]\n')
+planQueue(strandedClr.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCount: 3, macroStep: 0 }, { now: 100, state: null, cmdDoneMtime: null })
+check('a `%` above the frontier fires without the drain reaching it', strandedClr.sessions[0].prompts.find((p) => p.isClear)!.fired === true)
+const strandedOut = applyOps(strandedClr.lines, buildOps(strandedClr.sessions)).join('\n')
+check('the stranded `%` clears the finished run below it, keeps the frontier above', !strandedOut.includes('doneB') && !strandedOut.includes('doneA') && !/^\t%$/m.test(strandedOut) && strandedOut.includes(': top'))
+// A `%` above a still-pending run stays inert: the run below it hasn't finished, so nothing clears.
+const pendingClr = parse('alpha\n\t: top\n\t%\n\t: pending\n')
+planQueue(pendingClr.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCount: 2, macroStep: 0 }, { now: 100, state: null, cmdDoneMtime: null })
+check('a `%` above an unfinished run does not fire early', pendingClr.sessions[0].prompts.find((p) => p.isClear)!.fired !== true)
 
 // 5c. `$` command lines parse as one-shot commands (isCmd) separate from prompts.
 const cmds = 'alpha\n\tprompt: do a\n\t$git status\n\t$pnpm test\n'

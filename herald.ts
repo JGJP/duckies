@@ -282,9 +282,11 @@ interface Prompt {
 	// deletes the line — the request is consumed, not left as clutter.
 	isShow: boolean
 	fired: boolean
-	// A bare `%` line: a queue item that, when the drain reaches it (everything below it in
-	// its lane has run), deletes every prompt/command below it in that lane — and itself —
-	// collapsing the lane's completed run. `%`/`%1` scope to lane 1, `%%`/`%2` to lane 2, etc.
+	// A bare `%` line: a queue item that, once everything below it in its lane has run,
+	// deletes every prompt/command below it in that lane — and itself — collapsing the lane's
+	// completed run. It fires whether or not the drain reaches it: a `%` added under an
+	// already-finished run (the frontier now above it) still fires, since planQueue checks it
+	// independently of the climbing drain. `%`/`%1` scope to lane 1, `%%`/`%2` to lane 2, etc.
 	// Like `show` it never gets a marker; `fired` is set the tick it acts and buildOps does the
 	// deletion. A leading `%` is chosen because it never starts a prompt/command/comment.
 	isClear?: boolean
@@ -2028,6 +2030,22 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 		// Nothing running: dispatch the next pending item above the frontier (the
 		// top-most already-run item), or the bottom-most item on a fresh queue.
 		drainUp(frontierIdx(s), null)
+	}
+
+	// A `%` clear normally fires when the bottom-to-top drain reaches it (handled in drainUp).
+	// But if the frontier has already advanced *above* it — e.g. the `%` was added under a run
+	// that already finished — the drain, which only climbs, never revisits it and it sits inert
+	// forever. Fire any such stranded clear here regardless of where the frontier sits: it's
+	// eligible the moment nothing below it in the lane is still pending, running, errored, or
+	// walled off by a barrier (any of which means the run below it hasn't actually completed).
+	for (const c of s.prompts) {
+		if (!c.isClear || c.fired) continue
+		const blockedBelow = s.prompts.some(
+			(p) =>
+				p.order > c.order &&
+				(p.isBarrier || p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'ERROR' || (p.desiredKind === null && !p.isShow && !p.isClear)),
+		)
+		if (!blockedBelow) c.fired = true
 	}
 
 	// A `#` barrier holds the whole queue, including a pending /clear: keep the prompt
