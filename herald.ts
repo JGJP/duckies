@@ -25,7 +25,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 // dir) into one logical control — each file is an independent slice of sessions and
 // is rewritten in place. `HERALD_DIR` overrides the dir; `HERALD_FILE` forces
 // single-file mode (one explicit file, mainly for tests/one-offs).
-const CONTROL_DIR = process.env.HERALD_DIR ? resolve(process.env.HERALD_DIR) : HERE
+export const CONTROL_DIR = process.env.HERALD_DIR ? resolve(process.env.HERALD_DIR) : HERE
 const SINGLE_FILE = process.env.HERALD_FILE ? resolve(process.env.HERALD_FILE) : null
 const CONTROL_EXT = '.herald'
 // Optional YAML file of `label: /path/to/repo` aliases, so a header in a `.herald`
@@ -120,7 +120,7 @@ function resolveTarget(header: string, aliases: Aliases = {}): { label: string; 
 // Load the label→(path | {dir, worktree/*}) alias map, tolerating a missing/empty/malformed
 // file. A string value is a bare path; an object must carry a string `dir` (plus optional
 // string-array `worktree/cmd` and `worktree/copy`); anything else is dropped.
-function loadAliases(): Aliases {
+export function loadAliases(): Aliases {
 	try {
 		const parsed = YAML.parse(readFileSync(ALIASES_FILE, 'utf8'))
 		if (!parsed || typeof parsed !== 'object') return {}
@@ -144,7 +144,7 @@ const MACROS_FILE = process.env.HERALD_MACROS ? resolve(process.env.HERALD_MACRO
 export type Macros = Record<string, string>
 
 // Load the `@name`→block macro map, tolerating a missing/empty/malformed file.
-function loadMacros(): Macros {
+export function loadMacros(): Macros {
 	try {
 		const parsed = YAML.parse(readFileSync(MACROS_FILE, 'utf8'))
 		if (!parsed || typeof parsed !== 'object') return {}
@@ -1077,6 +1077,23 @@ const PREFIX = '__'
 const T = (label: string) => `${PREFIX}${label}`
 const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`
 
+// The herald-view window (window 0 of a top-level session): the tui in `--session` mode,
+// showing this label's `.herald` blocks compiled across every control file — live, editable,
+// bidirectionally synced. Launched with the same dir/alias/macro env the supervisor resolved,
+// so it compiles from exactly the files herald manages. tsx is taken from the repo's own
+// node_modules so the pane needs nothing on PATH.
+const TUI_PATH = join(HERE, 'tui.ts')
+const TSX_BIN = join(HERE, 'node_modules', '.bin', 'tsx')
+function viewCmd(label: string): string {
+	// `env` so the assignments work regardless of the pane's login shell (fish has no
+	// `VAR=val cmd` form); values are single-quoted for the shell that types the line.
+	const env: string[] = [`HERALD_DIR=${q(CONTROL_DIR)}`]
+	for (const k of ['HERALD_FILE', 'HERALD_ALIASES', 'HERALD_MACROS', 'HERALD_DEV_DIR'] as const) {
+		if (process.env[k]) env.push(`${k}=${q(process.env[k]!)}`)
+	}
+	return `env ${env.join(' ')} ${q(TSX_BIN)} ${q(TUI_PATH)} --session ${q(label)}`
+}
+
 async function listTmux(): Promise<Set<string>> {
 	const r = await $({ nothrow: true, quiet: true })`tmux list-sessions -F '#{session_name}'`
 	const out = new Set<string>()
@@ -1261,24 +1278,21 @@ async function doSpawn(label: string, dir: string) {
 	log(`spawning ${T(label)} in ${dir}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
-	// HERALD_LABEL/HERALD_STATE seed the session so its initial (claude) window inherits them
-	// for the Stop/Notification + prompt-capture hook; HERALD_SHELL marks only the shell window,
-	// where the per-shell hook writes command done-files (see herald-{fish,bash,zsh}.*).
-	await tm`tmux new-session -d -s ${T(label)} -n claude -c ${dir} -e ${`HERALD_LABEL=${label}`} -e ${`HERALD_STATE=${STATE}`}`
-	// Tag the claude pane, then open a second window as a free shell for the user.
-	await tm`tmux set-option -p -t ${T(label)} @herald claude`
-	await makeShellWindow(label, dir)
+	// Every session opens with the herald view as window 0 (so it sorts first and an attach
+	// lands on it): a live, editable, cross-file-merged view of this label's `.herald` blocks. A
+	// worktree label has no column-0 header of its own, so its view is compiled with the parent
+	// repo header as context (see tui.ts viewParts) — the pane still just runs `--session <label>`.
+	await tm`tmux new-session -d -s ${T(label)} -n herald -c ${CONTROL_DIR}`
+	const viewPane = (await tm`tmux list-panes -t ${T(label)} -F ${'#{pane_id}'}`).stdout.split('\n')[0]?.trim() || T(label)
+	await tm`tmux set-option -p -t ${viewPane} @herald view`
 	await sleep(300)
-	await sendLine(label, launchCmd())
-	// The claude and shell panes have now inherited the herald identity at launch (the shell
-	// window sets its own via new-window -e), so strip it back out of the *session* env. A
-	// window the user opens later — e.g. an ad-hoc `claude` for a handoff — must NOT inherit
-	// HERALD_LABEL, or its hook would report to this lane: clobbering the real claude's status
-	// file and mirroring its prompts into the control file as if they were this lane's.
-	await tm`tmux set-environment -t ${T(label)} -u HERALD_LABEL`
-	await tm`tmux set-environment -t ${T(label)} -u HERALD_STATE`
-	// Leave the claude window focused so an attach shows it first.
-	await tm`tmux select-window -t ${await claudePane(label)}`
+	await typeInto(viewPane, viewCmd(label))
+	// claude + shell as their own tagged windows; ensurePaneWindow sets HERALD_LABEL/STATE
+	// per-window, so no session-level env is needed (and none leaks to ad-hoc windows).
+	await ensurePaneWindow(label, dir, 'claude', 1)
+	await makeShellWindow(label, dir)
+	// Focus the view window so attaching/revealing the session lands on it first.
+	await tm`tmux select-window -t ${viewPane}`
 	// The tmux steps above run with nothrow; a partial spawn leaves a half-formed
 	// session that blocks command dispatch. Warn loudly (the readiness gate repairs it).
 	const roles = await taggedRoles(label)
@@ -1497,7 +1511,7 @@ const atomicWrite = (path: string, content: string) => {
 
 // Every `*.herald` file in the control dir, sorted for a stable merge order. In
 // single-file mode (HERALD_FILE) it's just that one file, if it exists.
-function controlFiles(): string[] {
+export function controlFiles(): string[] {
 	if (SINGLE_FILE) return existsSync(SINGLE_FILE) ? [SINGLE_FILE] : []
 	let names: string[]
 	try {

@@ -14,15 +14,21 @@
 // Save with `:w`. Vim-ish core: NORMAL/INSERT/VISUAL/COMMAND modes; motions
 // h j k l w b e 0 ^ $ gg G f F t T {count}; edits x r i a I A o O d c y p P dd cc yy
 // D C s S; undo u / redo C-r; search / n N; ex :w :q :wq :x :q! :{line}.
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { diff3Merge } from 'node-diff3'
+import { CONTROL_DIR, controlFiles, loadAliases, loadMacros, parse } from './herald'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+// `--session <label>` runs a compiled session view: instead of one file, the buffer is this
+// label's `.herald` blocks merged across every control file (see compileSession), live-synced
+// and written back per source file. This is what herald opens as window 0 of each session.
+const sessionIdx = process.argv.indexOf('--session')
+const SESSION_LABEL = sessionIdx >= 0 ? (process.argv[sessionIdx + 1] ?? null) : null
 // Which file to edit: an explicit `pnpm herald <file>` arg (a bare name is looked up
-// in the repo dir), else HERALD_FILE, else the default `.herald`.
-const argFile = process.argv[2]
+// in the repo dir), else HERALD_FILE, else the default `.herald`. Unused in session mode.
+const argFile = SESSION_LABEL ? undefined : process.argv[2]
 const FILE = argFile
 	? resolve(argFile.includes('/') ? argFile : join(HERE, argFile))
 	: process.env.HERALD_FILE
@@ -71,24 +77,168 @@ export function nearestIndex(lines: string[], value: string, near: number): numb
 	return best === -1 ? Math.min(near, lines.length - 1) : best
 }
 
+// ── compiled session view (multi-file merge + write-back) ─────────────────────
+// A control file's current content, as buffer lines.
+export interface HeraldFile {
+	path: string
+	lines: string[]
+}
+const ALIASES = loadAliases()
+const MACROS = loadMacros()
+// Read every control file herald manages (the same set, resolved from the same env).
+const readControlFiles = (): HeraldFile[] =>
+	controlFiles()
+		.map((path) => {
+			try {
+				return { path, lines: toLines(readFileSync(path, 'utf8')) }
+			} catch {
+				return null
+			}
+		})
+		.filter((f): f is HeraldFile => f !== null)
+
+// The top-level session blocks (column-0 header .. last child line) for `label`, across the
+// given files in order. Uses herald's own parse(), so the slice matches the supervisor's model
+// exactly. A worktree label has no such block — see viewParts.
+export function viewBlocks(files: HeraldFile[], label: string): { path: string; start: number; end: number }[] {
+	const out: { path: string; start: number; end: number }[] = []
+	for (const f of files) {
+		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS)
+		for (const s of sessions.filter((s) => (s.indent ?? '') === '' && s.label === label).sort((a, b) => a.headerIdx - b.headerIdx)) {
+			out.push({ path: f.path, start: s.headerIdx, end: s.lastChildIdx })
+		}
+	}
+	return out
+}
+
+// One block of the compiled view: the source range `start..end` in `path`, plus an optional
+// `header` context line to prepend. `header` is null for a top-level session (its block already
+// begins with a column-0 header); for a worktree it's the parent repo header, so the compiled
+// buffer stays parseable and shows where the worktree lives — that context line is stripped back
+// off on write-back, leaving only the worktree's own indented block on disk.
+export interface ViewPart {
+	path: string
+	start: number
+	end: number
+	header: string | null
+}
+
+// The blocks that make up `label`'s view. A top-level label → its own blocks (header null). A
+// worktree label (no column-0 header of its own) → each occurrence's indented block, tagged with
+// its enclosing repo header for context. A label is one kind or the other, never both.
+export function viewParts(files: HeraldFile[], label: string): ViewPart[] {
+	const top: ViewPart[] = []
+	const wt: ViewPart[] = []
+	for (const f of files) {
+		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS)
+		const tops = sessions.filter((s) => (s.indent ?? '') === '')
+		for (const s of sessions.filter((s) => s.label === label).sort((a, b) => a.headerIdx - b.headerIdx)) {
+			if ((s.indent ?? '') === '') top.push({ path: f.path, start: s.headerIdx, end: s.lastChildIdx, header: null })
+			else {
+				// The enclosing top-level session (its range spans this worktree); its header is context.
+				const anc = tops.filter((t) => t.headerIdx <= s.headerIdx && t.lastChildIdx >= s.lastChildIdx).sort((a, b) => b.headerIdx - a.headerIdx)[0]
+				wt.push({ path: f.path, start: s.headerIdx, end: s.lastChildIdx, header: anc ? f.lines[anc.headerIdx] : label.split('-')[0] })
+			}
+		}
+	}
+	return top.length ? top : wt
+}
+
+// Compile the view buffer for `label`: each part's lines, in order, concatenated verbatim (so
+// in-block comments, barriers, notes and status markers all carry through), with a worktree's
+// context header prepended.
+export function compileSession(files: HeraldFile[], label: string): string[] {
+	const view: string[] = []
+	for (const p of viewParts(files, label)) {
+		if (p.header !== null) view.push(p.header)
+		const f = files.find((x) => x.path === p.path)!
+		view.push(...f.lines.slice(p.start, p.end + 1))
+	}
+	return view
+}
+
+// Every top-level session block in a buffer (any label). The view only ever holds this
+// session's blocks, so these are exactly the blocks to write back — matching by structure, not
+// label, so renaming the header still round-trips instead of dropping the block.
+function bufferBlocks(buffer: string[]): string[][] {
+	const { sessions } = parse(buffer.join('\n'), ALIASES, MACROS)
+	return sessions
+		.filter((s) => (s.indent ?? '') === '')
+		.sort((a, b) => a.headerIdx - b.headerIdx)
+		.map((s) => buffer.slice(s.headerIdx, s.lastChildIdx + 1))
+}
+
+// Reconcile an edited session buffer back into the source files. Each buffer block is paired in
+// order with the disk block it was compiled from and replaces it in place; a surplus buffer
+// block is appended to the primary file (the first that holds this label, else a new
+// `<label>.herald`); a surplus disk block (the user deleted one) is removed. In a worktree view
+// each buffer block is `[contextHeader, ...body]` — the header is dropped and only the body is
+// written to the worktree's own range. Returns only the files whose content changed. Pure, so
+// it's unit-testable.
+export function planSessionWriteback(files: HeraldFile[], label: string, buffer: string[], primaryDir: string): HeraldFile[] {
+	const parts = viewParts(files, label)
+	// In a worktree view every compiled block is prefixed with a context header; strip it back
+	// off so the body maps to the worktree's own on-disk range.
+	const hasCtx = parts.some((p) => p.header !== null)
+	const bodies = bufferBlocks(buffer).map((b) => (hasCtx ? b.slice(1) : b))
+	const next = new Map(files.map((f) => [f.path, [...f.lines]]))
+	const edits = new Map<string, { start: number; end: number; repl: string[] | null }[]>()
+	const add = (p: string, e: { start: number; end: number; repl: string[] | null }) => {
+		if (!edits.has(p)) edits.set(p, [])
+		edits.get(p)!.push(e)
+	}
+	const paired = Math.min(bodies.length, parts.length)
+	for (let i = 0; i < paired; i++) add(parts[i].path, { start: parts[i].start, end: parts[i].end, repl: bodies[i] })
+	for (let i = paired; i < parts.length; i++) add(parts[i].path, { start: parts[i].start, end: parts[i].end, repl: null })
+	// Splice each file's blocks bottom-up so earlier line indices stay valid.
+	for (const [p, es] of edits) {
+		const lines = next.get(p)!
+		for (const e of es.sort((a, b) => b.start - a.start)) {
+			if (e.repl === null) lines.splice(e.start, e.end - e.start + 1)
+			else lines.splice(e.start, e.end - e.start + 1, ...e.repl)
+		}
+	}
+	if (bodies.length > parts.length) {
+		const primaryPath = parts[0]?.path ?? join(primaryDir, `${label}.herald`)
+		if (!next.has(primaryPath)) next.set(primaryPath, [])
+		const lines = next.get(primaryPath)!
+		for (let i = parts.length; i < bodies.length; i++) {
+			if (lines.length && lines[lines.length - 1].trim() !== '') lines.push('')
+			lines.push(...bodies[i])
+		}
+	}
+	const out: HeraldFile[] = []
+	for (const [p, lines] of next) {
+		const orig = files.find((f) => f.path === p)?.lines
+		if (!orig || !eq(orig, lines)) out.push({ path: p, lines })
+	}
+	return out
+}
+
 // ── syntax highlighting (mirrors parse() / herald.sublime-syntax) ─────────────
+// Truecolor ANSI matching herald.sublime-color-scheme exactly (same hexes, same fg/bg per
+// scope), so the tui looks like the file does in Sublime. `#` comments and `-> ` notes have no
+// scheme rule (they inherit the editor's comment color), so they use a muted grey here; `show`
+// likewise has no rule (inherits keyword.control), so it keeps a keyword-ish accent.
+const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
+const fgbg = (fr: number, fg_: number, fb: number, br: number, bg: number, bb: number) => `\x1b[38;2;${fr};${fg_};${fb};48;2;${br};${bg};${bb}m`
 const C = {
 	reset: '\x1b[0m',
-	comment: '\x1b[38;5;244m',
-	header: '\x1b[1;38;5;39m',
-	promptSigil: '\x1b[38;5;79m',
-	promptText: '\x1b[38;5;250m',
-	cmdSigil: '\x1b[38;5;114m',
-	cmdText: '\x1b[38;5;180m',
-	show: '\x1b[38;5;170m',
-	macro: '\x1b[38;5;16;48;2;6;199;85m', // black on LINE green (#06C755)
-	exec: '\x1b[38;5;220m',
-	done: '\x1b[38;5;114m',
-	attn: '\x1b[1;38;5;203m',
-	error: '\x1b[38;5;231;48;2;255;0;0m', // white on bright red — a failed `$command`
-	marker: '\x1b[38;5;203m',
-	shownow: '\x1b[38;5;16;48;5;231m', // black on white — a leading-`!` "show now" line
-	clear: '\x1b[38;5;16;48;2;255;230;0m', // black on yellow — a `%` clear-below line
+	comment: '\x1b[38;5;244m', // muted grey — inherits the scheme's comment color in Sublime
+	header: '\x1b[1;4;38;2;255;255;255m', // #ffffff bold underline (entity.name.class)
+	promptSigil: fg(255, 255, 255), // #ffffff (keyword.control.prompt / meta.prompt)
+	promptText: fg(255, 255, 255),
+	cmdSigil: fg(51, 153, 255), // #3399ff (keyword.operator.command / string.unquoted.command)
+	cmdText: fg(51, 153, 255),
+	show: '\x1b[38;5;170m', // keyword-ish accent — no scheme rule to match
+	macro: fg(166, 223, 149), // #a6df95, no background (entity.name.function.macro)
+	exec: fgbg(0, 0, 0, 255, 121, 26), // black on #ff791a (constant.language.executing)
+	done: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (markup.inserted.done)
+	attn: fgbg(0, 0, 0, 255, 204, 0), // black on #ffcc00 (invalid.deprecated.attention)
+	error: fgbg(255, 255, 255, 255, 0, 0), // white on #ff0000 (invalid.illegal.error)
+	marker: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (invalid.illegal.marker — [NO DIR …])
+	shownow: fgbg(0, 0, 0, 255, 255, 255), // black on #ffffff (markup.other.shownow)
+	clear: fgbg(0, 0, 0, 255, 230, 0), // black on #ffe600 (markup.other.clear)
 	gutter: '\x1b[38;5;240m',
 	gutterCur: '\x1b[38;5;250m',
 	status: '\x1b[7m',
@@ -149,9 +299,10 @@ function colorsFor(line: string): (string | null)[] {
 		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : inner.includes('error') ? C.error : C.marker
 		fill(lead, lead + m[1].length, c)
 	} else {
-		// A worktree name (indented non-sigil): a git worktree of the enclosing repo,
-		// styled like the repo header it stands in for.
-		fill(0, n, C.header)
+		// A worktree name (indented non-sigil): a git worktree of the enclosing repo, styled like
+		// the repo header it stands in for. Fill from `lead` (not 0) so the indent isn't underlined
+		// — Sublime scopes only the label text (`\S…`), not the leading tabs.
+		fill(lead, n, C.header)
 	}
 	return col
 }
@@ -541,7 +692,7 @@ function render() {
 		buf += cmdKind + cmdline
 	} else {
 		const tag = mode === 'insert' ? '-- INSERT --' : mode === 'visual' ? '-- VISUAL --' : mode === 'vline' ? '-- VISUAL LINE --' : ''
-		const name = FILE.replace(process.env.HOME || '~', '~')
+		const name = SESSION_LABEL ? `session:${SESSION_LABEL}` : FILE.replace(process.env.HOME || '~', '~')
 		const flag = (newFile ? ' [New]' : '') + (modified() ? ' [+]' : '')
 		const leftStr = ` ${tag || name + flag}`
 		const rightStr = `${message ? message + '  ' : ''}${cy + 1}:${cx + 1}  ${lines.length}L `
@@ -1067,7 +1218,21 @@ function runEx(raw: string) {
 	}
 }
 
+const atomicWriteFile = (path: string, content: string) => {
+	const tmp = `${path}.tmp`
+	writeFileSync(tmp, content)
+	renameSync(tmp, path) // atomic swap, so the supervisor never reads a half-written file
+}
+
 function save() {
+	if (SESSION_LABEL) {
+		// Decompile the buffer back into each source file's block(s). Atomic per-file writes so
+		// the supervisor's dir-watch sees a complete file; the merge in sync() has already folded
+		// in any concurrent marker changes, so a plain overwrite of the blocks is safe.
+		for (const f of planSessionWriteback(readControlFiles(), SESSION_LABEL, lines, CONTROL_DIR)) atomicWriteFile(f.path, f.lines.join('\n') + '\n')
+		base = lines.slice()
+		return
+	}
 	writeFileSync(FILE, lines.join('\n') + '\n')
 	base = lines.slice() // we and disk now agree
 	newFile = false
@@ -1122,27 +1287,30 @@ function doRedo() {
 // ── live sync with the supervisor ─────────────────────────────────────────────────
 function sync() {
 	if (mode !== 'normal' || op || awaitG || awaitReplace || awaitFind) return
-	let disk: string[]
+	// `theirs` is what the supervisor's writes currently produce: the raw file, or (session
+	// mode) this label's blocks recompiled across every control file. The merge below is the
+	// same either way.
+	let theirs: string[]
 	try {
-		disk = toLines(readFileSync(FILE, 'utf8'))
+		theirs = SESSION_LABEL ? compileSession(readControlFiles(), SESSION_LABEL) : toLines(readFileSync(FILE, 'utf8'))
 	} catch {
 		return
 	}
-	if (eq(disk, base)) return // no external write since we last synced
+	if (eq(theirs, base)) return // no external write since we last synced
 	if (!modified()) {
 		// clean reload — keep the cursor on the same logical line
 		const anchor = lines[cy] ?? ''
-		lines = disk
+		lines = theirs
 		cy = Math.max(0, Math.min(nearestIndex(lines, anchor, cy), lines.length - 1))
 	} else {
 		const anchor = lines[cy] ?? ''
-		const merged = merge3(lines, base, disk)
+		const merged = merge3(lines, base, theirs)
 		if (!eq(merged, lines)) {
 			lines = merged
 			cy = Math.max(0, Math.min(nearestIndex(lines, anchor, cy), lines.length - 1))
 		}
 	}
-	base = disk
+	base = theirs
 	clampCursor()
 	render()
 }
@@ -1158,26 +1326,31 @@ function main() {
 		console.error('herald tui needs an interactive terminal')
 		process.exit(1)
 	}
-	if (!existsSync(FILE)) {
-		// With no explicit arg the default is `.herald`; if that's absent but other
-		// `*.herald` files exist, point the user at them rather than opening a stray
-		// empty `.herald`. An explicitly named missing file opens as a new buffer.
-		if (!argFile) {
-			let siblings: string[] = []
-			try {
-				siblings = readdirSync(dirname(FILE)).filter((f) => f.endsWith('.herald') && f !== '.herald').sort()
-			} catch {}
-			if (siblings.length) {
-				console.error(`no .herald file here. edit one of these instead:\n${siblings.map((s) => `  pnpm herald ${s}`).join('\n')}`)
-				process.exit(1)
+	if (SESSION_LABEL) {
+		// Compiled session view — the buffer is this label's blocks across every control file.
+		lines = compileSession(readControlFiles(), SESSION_LABEL)
+		newFile = false
+	} else {
+		if (!existsSync(FILE)) {
+			// With no explicit arg the default is `.herald`; if that's absent but other
+			// `*.herald` files exist, point the user at them rather than opening a stray
+			// empty `.herald`. An explicitly named missing file opens as a new buffer.
+			if (!argFile) {
+				let siblings: string[] = []
+				try {
+					siblings = readdirSync(dirname(FILE)).filter((f) => f.endsWith('.herald') && f !== '.herald').sort()
+				} catch {}
+				if (siblings.length) {
+					console.error(`no .herald file here. edit one of these instead:\n${siblings.map((s) => `  pnpm herald ${s}`).join('\n')}`)
+					process.exit(1)
+				}
 			}
 		}
+		lines = toLines(existsSync(FILE) ? readFileSync(FILE, 'utf8') : '')
+		newFile = !existsSync(FILE)
 	}
-	const initial = existsSync(FILE) ? readFileSync(FILE, 'utf8') : ''
-	newFile = !existsSync(FILE)
-	lines = toLines(initial)
-	base = lines.slice()
 	if (lines.length === 0) lines = ['']
+	base = lines.slice()
 
 	process.stdin.setRawMode(true)
 	process.stdin.resume()

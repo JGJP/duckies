@@ -96,6 +96,19 @@ buffer **without disturbing what you're typing**:
 Save with `:w`; quit with `:q` (`:wq`/`:x` to do both). It needs an interactive
 terminal and respects `HERALD_FILE`. Runs alongside `pnpm start` (that's the point).
 
+### Per-session view window
+
+Every managed session opens with this editor as its **first window** (`herald`),
+already scoped to that session: `pnpm herald --session <label>`. The buffer is the
+session's blocks **compiled across every `*.herald` file** (a label can appear in
+more than one — they're merged into one queue), shown verbatim with all status
+markers, notes, and in-block comments. It syncs both ways — the supervisor's marker
+writes fold in live, and `:w` writes your edits back into the exact source file each
+block came from (new blocks go to the first file that holds the label). A worktree
+session gets the same view of its own block, compiled with the parent repo header as
+a context line (its block is indented, so the header keeps the buffer parseable and
+shows where the worktree lives); edits write back to just the worktree's own lines.
+
 **Keys** (a practical vim subset):
 
 - **Modes** — `i a I A o O` enter insert; `Esc` returns to normal; `v` / `V` start
@@ -182,8 +195,9 @@ moonbase-2
   	| Host key verification failed.
   		[EXECUTING]
   ```
-- `$command` lines run **once** in the session's **shell window** (the 2nd window,
-  not the claude pane). A command is marked `[EXECUTING]` when dispatched and only
+- `$command` lines run **once** in the session's **shell window** (a separate window
+  from the claude pane; the windows are `herald` view, `claude`, then `shell`). A
+  command is marked `[EXECUTING]` when dispatched and only
   advances to `[DONE]` once it has actually **exited** (a per-shell hook writes its
   exit status to `state/<label>.cmd` and the controller waits for that done-file). A command
   that never exits (e.g. a server) stays `[EXECUTING]` and blocks the rest of the

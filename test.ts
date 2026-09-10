@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { aliasWorktree, applyOps, buildOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho, vacatedSessions, vacateOps } from './herald'
-import { merge3, nearestIndex, toLines } from './tui'
+import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 
 let failures = 0
 const check = (name: string, cond: boolean, detail?: string) => {
@@ -1016,6 +1016,59 @@ check(
 	check('a summary survives the marker being stripped as the frontier moves', noteApply('repo\n\t: done one\n\t\t[EXECUTING]\n', 'summary', null) === 'repo\n\t: done one\n\t\t-> summary\n')
 	// idempotent: with a note already in the file, a pending desiredNote inserts nothing.
 	check('desiredNote is ignored when a note already exists', noteApply('repo\n\t: x\n\t\t[DONE]\n\t\t-> old\n', 'new') === 'repo\n\t: x\n\t\t[DONE]\n\t\t-> old\n')
+}
+
+// ── compiled session view (tui.ts --session) ───────────────────────────────────
+{
+	const A = { path: '/tmp/a.herald', lines: ['ztest', '\t: do A', '\t\t[DONE]', '', 'other', '\t: unrelated'] }
+	const B = { path: '/tmp/b.herald', lines: ['ztest', '\t: do B', '\t\t[EXECUTING]'] }
+
+	// The view is this label's blocks merged across files, verbatim (markers and all).
+	const view = compileSession([A, B], 'ztest')
+	check('compileSession merges a label across files, excluding others', view.join('\n') === ['ztest', '\t: do A', '\t\t[DONE]', 'ztest', '\t: do B', '\t\t[EXECUTING]'].join('\n'))
+
+	// viewBlocks reports the per-file ranges (A: 0..2, B: 0..2); `other` is not included.
+	const blocks = viewBlocks([A, B], 'ztest')
+	check('viewBlocks finds one block per file, by label', blocks.length === 2 && blocks[0].path === A.path && blocks[0].end === 2 && blocks[1].path === B.path)
+
+	// Edit a prompt in the view; only the file that block came from changes, and in place.
+	const edited = [...view]
+	edited[1] = '\t: do A (edited)'
+	const wb1 = planSessionWriteback([A, B], 'ztest', edited, '/tmp')
+	check('writeback rewrites only the edited block’s file', wb1.length === 1 && wb1[0].path === A.path)
+	check('writeback keeps the rest of that file intact', wb1[0].lines.join('\n') === ['ztest', '\t: do A (edited)', '\t\t[DONE]', '', 'other', '\t: unrelated'].join('\n'))
+
+	// An unchanged view writes nothing back (round-trip is a no-op).
+	check('writeback of an unchanged view changes no files', planSessionWriteback([A, B], 'ztest', view, '/tmp').length === 0)
+
+	// A surplus buffer block appends to the primary file (first that holds the label), blank-separated.
+	const added = [...view, 'ztest', '\t: brand new']
+	const wb2 = planSessionWriteback([A, B], 'ztest', added, '/tmp')
+	const primary = wb2.find((f) => f.path === A.path)!
+	check('a surplus view block appends to the primary file', primary.lines.join('\n') === ['ztest', '\t: do A', '\t\t[DONE]', '', 'other', '\t: unrelated', '', 'ztest', '\t: brand new'].join('\n'))
+
+	// Deleting a block in the view removes it from its file (fewer buffer blocks than disk).
+	const dropped = view.slice(0, 3) // keep only A's block
+	const wb3 = planSessionWriteback([A, B], 'ztest', dropped, '/tmp')
+	const bFile = wb3.find((f) => f.path === B.path)!
+	check('deleting a view block removes it from its source file', bFile.lines.join('\n') === '')
+
+	// A worktree label has no top-level block of its own …
+	const W = { path: '/tmp/w.herald', lines: ['repo', '\tfeat', '\t\t: work', '\t\t\t[DONE]', '\tother-wt', '\t\t: x'] }
+	check('a worktree label has no top-level block of its own', viewBlocks([W], 'repo-feat').length === 0 && viewBlocks([W], 'repo').length === 1)
+
+	// … but its view is compiled with the parent repo header as context, then just the worktree block.
+	const wtView = compileSession([W], 'repo-feat')
+	check('a worktree view prepends the parent header, then the worktree block', wtView.join('\n') === ['repo', '\tfeat', '\t\t: work', '\t\t\t[DONE]'].join('\n'))
+
+	// Editing the worktree view writes back only the worktree’s own range (context header dropped).
+	const wtEdited = [...wtView]
+	wtEdited[2] = '\t\t: work harder'
+	const wtWb = planSessionWriteback([W], 'repo-feat', wtEdited, '/tmp')
+	check('a worktree write-back touches only the worktree block, not the parent or siblings', wtWb.length === 1 && wtWb[0].lines.join('\n') === ['repo', '\tfeat', '\t\t: work harder', '\t\t\t[DONE]', '\tother-wt', '\t\t: x'].join('\n'))
+
+	// An unchanged worktree view is a no-op round-trip.
+	check('a worktree view round-trips with no changes', planSessionWriteback([W], 'repo-feat', wtView, '/tmp').length === 0)
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
