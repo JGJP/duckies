@@ -24,8 +24,8 @@
 			}
 		},
 		{
-			"comment": "Widget call: a `&name [args]` line — a live status display the controller reruns on an interval, mirroring its output below as `| ` lines. A name char must follow the `&`.",
-			"match": "^[ \\t]*(&[\\w-]+(?:[ \\t:].*)?)$",
+			"comment": "Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines. A single `&` runs once; `&&` reruns on the widget's interval. A name char follows the sigil.",
+			"match": "^[ \\t]*(&+[\\w-]+(?:[ \\t:].*)?)$",
 			"captures": {
 				"1": { "name": "entity.name.function.widget.herald" }
 			}

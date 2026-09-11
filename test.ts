@@ -1118,6 +1118,22 @@ check(
 	check('&name parses as a widget, not a queue item', s1.widgets.length === 1 && s1.prompts.length === 0 && s1.widgets[0].name === 'pr')
 	check('a fresh widget has no output range yet', s1.widgets[0].hasOutput === false)
 
+	// A single `&` is a one-shot (`once: true`); doubling to `&&` makes it live (`once: false`), and
+	// the sigil run is preserved in `call` so a rewrite keeps once/live and the name intact.
+	check('a single `&` parses as a one-shot widget', s1.widgets[0].once === true && s1.widgets[0].call === '&pr')
+	const live = parse('repo\n\t&&pr 42\n', {}, {}, widgets)
+	const lw = live.sessions[0].widgets[0]
+	check('a `&&` parses as a live widget, preserving args and sigil', lw.once === false && lw.name === 'pr' && JSON.stringify(lw.args) === JSON.stringify(['42']) && lw.call === '&&pr 42')
+	check('a live widget round-trips its `&&` through an inline rewrite', applyOps(live.lines, buildWidgetOps(live.sessions, live.lines, new Map([[lw, 'ok']]))).join('\n') === 'repo\n\t&&pr 42: ok\n')
+
+	// A leading `!` (`!&pr`) is a one-shot "refresh now": it sets `bang`, but `call` is the clean
+	// `&pr` — so the rewrite regenerates the line without the `!`, consuming it.
+	const bang = parse('repo\n\t!&pr\n', {}, {}, widgets)
+	const bw = bang.sessions[0].widgets[0]
+	check('a leading `!` on a widget sets bang and keeps a clean call', bw.bang === true && bw.once === true && bw.call === '&pr')
+	check('running a bang widget rewrites the line without the `!`', applyOps(bang.lines, buildWidgetOps(bang.sessions, bang.lines, new Map([[bw, 'done']]))).join('\n') === 'repo\n\t&pr: done\n')
+	check('a plain widget has no bang', s1.widgets[0].bang === false)
+
 	// An undefined `&name` is left to normal parsing (it becomes a worktree container), so a typo
 	// never silently vanishes as an inert widget.
 	const w2 = parse('repo\n\t&nope\n', {}, {}, widgets)

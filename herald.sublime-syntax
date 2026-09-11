@@ -34,10 +34,10 @@ contexts:
       captures:
         1: entity.name.function.macro.herald
 
-    # Widget call: a `&name [args]` line — a live status display the controller reruns on an
-    # interval, mirroring its output below as `| ` lines (see herald-widgets.yaml). Same shape as
-    # a macro call, its own hue via the color scheme. A name char must follow the `&`.
-    - match: '^[ \t]*(&[\w-]+(?:[ \t:].*)?)$'
+    # Widget call: a `&name [args]` line — a status display, mirroring its output below as `| `
+    # lines (see herald-widgets.yaml). A single `&` runs once; `&&` reruns on the widget's interval.
+    # Same shape as a macro call, its own hue via the color scheme. A name char follows the sigil.
+    - match: '^[ \t]*(&+[\w-]+(?:[ \t:].*)?)$'
       captures:
         1: entity.name.function.widget.herald
 

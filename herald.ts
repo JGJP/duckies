@@ -164,9 +164,10 @@ export interface MacroStep {
 }
 
 // Optional YAML file of widgets: `name: { interval: <ms>, commands: [<shell cmd>, …] }`. An
-// `&name` line in a `.herald` file is a live status display — herald reruns its commands every
-// `interval` ms and mirrors their combined stdout back into the file as `| `-prefixed lines
-// indented below the `&name` line. Unlike a macro, a widget never drains: it isn't a queue item.
+// `&name` line in a `.herald` file is a status display — herald runs its commands and mirrors
+// their combined stdout back into the file as `| `-prefixed lines indented below the `&name` line.
+// A single `&` runs once; `&&` reruns every `interval` ms (live). Unlike a macro, a widget never
+// drains: it isn't a queue item.
 const WIDGETS_FILE = process.env.HERALD_WIDGETS ? resolve(process.env.HERALD_WIDGETS) : join(HERE, 'herald-widgets.yaml')
 export interface Widget {
 	interval: number
@@ -203,9 +204,10 @@ export function loadWidgets(): Widgets {
 // follow the `@`, so a body line like `@@@…` never matches.
 const MACRO_RE = /^([ \t]*)@([\w-]+)(?:[ \t]+(.*\S))?[ \t]*$/
 // A `&<name> [args…]` line (any indent) is a widget call — same shape as a macro call, but it
-// resolves against the widget map and produces live output instead of queue steps. A name char
-// must follow the `&`; the rest is args and/or an inline-output suffix (see the parse handler).
-const WIDGET_RE = /^&([\w-]+)(.*)$/
+// resolves against the widget map and produces live output instead of queue steps. A single `&`
+// runs the widget once (a one-shot capture); `&&` reruns it on the widget's interval (live). The
+// name char must follow the sigil run; the rest is args and/or an inline-output suffix (see parse).
+const WIDGET_RE = /^(&+)([\w-]+)(.*)$/
 const macroArgs = (s: string): string[] => (s.match(/"[^"]*"|\S+/g) ?? []).map((a) => (a.startsWith('"') && a.endsWith('"') ? a.slice(1, -1) : a))
 const fillArgs = (text: string, args: string[]): string => text.replace(/\{\*\}/g, args.join(' ')).replace(/\{(\d+)\}/g, (_, d) => args[+d] ?? '')
 // Expand a macro body into steps, in RUN order: fill args, drop blank and `#` comment lines,
@@ -346,12 +348,17 @@ interface Session {
 // A parsed `&name [args]` line plus its current output. Single-line output renders inline on the
 // widget line as `&name[ args]: <output>` (`inline` true); multi-line output renders as a `| `
 // block one indent below, spanning `outputStartIdx..outputEndIdx` (`hasOutput` true). `call` is
-// the indent-less `&name[ args]` text (no inline suffix), so a rewrite preserves name and args.
-// The tick reruns the widget's commands every `interval` ms and rewrites whichever form fits.
+// the indent-less `&name[ args]` text (with its sigil run, no inline suffix), so a rewrite
+// preserves the once/live sigil, name and args. The tick reruns a live (`&&`) widget's commands
+// every `interval` ms; a one-shot (`&`) widget runs a single time and is never rerun after.
+// `bang` records a leading `!` (`!&pr`): a one-shot "refresh now" that forces a single run this
+// tick regardless of the gate. It's consumed by the rewrite — `call` is clean, so the `!` is gone.
 export interface WidgetItem {
 	name: string
 	args: string[]
 	call: string
+	once: boolean
+	bang: boolean
 	inline: boolean
 	lineIdx: number
 	indent: string
@@ -499,20 +506,23 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		// [NO DIR …]) is inserted below the worktree's own block, not the repo's.
 		target.lastChildIdx = i
 		const widgetMatch = t.match(WIDGET_RE)
-		if (widgetMatch && widgets[widgetMatch[1]] !== undefined) {
-			// An `&name [args]` call: a live display, not a queue item. The tick reruns its commands
-			// on an interval and rewrites the output — inline as `&name: …` for a single line, or a
-			// `| ` block below for several. Split an optional inline-output suffix (` : <output>`) off
-			// the rest here: the `: ` delimiter can't clash with the name and rarely with an arg, and
-			// whatever follows is herald's own output, overwritten each run.
-			const rest = widgetMatch[2]
+		if (widgetMatch && widgets[widgetMatch[2]] !== undefined) {
+			// A `&name [args]` call: a live display, not a queue item. A single `&` captures the output
+			// once; `&&` reruns on the widget's interval. The tick rewrites the output — inline as
+			// `&name: …` for a single line, or a `| ` block below for several. Split an optional
+			// inline-output suffix (` : <output>`) off the rest here: the `: ` delimiter can't clash
+			// with the name and rarely with an arg, and whatever follows is herald's own output.
+			const sigil = widgetMatch[1]
+			const rest = widgetMatch[3]
 			const ci = rest.indexOf(': ')
 			const callArgs = ci >= 0 ? rest.slice(0, ci) : rest
 			const argsStr = callArgs.trim()
 			const item: WidgetItem = {
-				name: widgetMatch[1],
+				name: widgetMatch[2],
 				args: argsStr ? macroArgs(argsStr) : [],
-				call: `&${widgetMatch[1]}${callArgs}`.trimEnd(),
+				call: `${sigil}${widgetMatch[2]}${callArgs}`.trimEnd(),
+				once: sigil.length === 1,
+				bang: leadingBang,
 				inline: ci >= 0,
 				lineIdx: i,
 				indent: tabs,
@@ -2366,9 +2376,10 @@ async function tick(rt: Rt) {
 	}
 
 	// ---- widget pass: rerun each due `&name` widget and mirror its output back into the file ----
-	// A widget is a live display, not a queue item: every `interval` ms herald reruns its commands
-	// and rewrites the `| ` block below the `&name` line. Runs happen concurrently and are gated per
-	// widget by `rt[label].widgets[key].lastRun`; the resulting ops merge into the per-file rewrite
+	// A widget is a live display, not a queue item: a live (`&&`) widget reruns its commands every
+	// `interval` ms; a one-shot (`&`) widget runs once. Either way herald rewrites the `| ` block
+	// below the `&name` line. Runs happen concurrently and are gated per widget by
+	// `rt[label].widgets[key].lastRun`; the resulting ops merge into the per-file rewrite
 	// below (so they respect the same mid-tick defer, and an unchanged display writes nothing).
 	const widgetOpsByPath = new Map<string, Op[]>()
 	if (!DRY) {
@@ -2385,7 +2396,12 @@ async function tick(rt: Rt) {
 					const occ = perLabel.get(w.name) ?? 0
 					perLabel.set(w.name, occ + 1)
 					const key = `${w.name}#${occ}`
-					if (now - (rt[s.label]?.widgets?.[key]?.lastRun ?? 0) < def.interval) continue
+					const lastRun = rt[s.label]?.widgets?.[key]?.lastRun ?? 0
+					// A leading `!` (`w.bang`) forces a single refresh now, whatever the gate says; the
+					// rewrite regenerates the line from the clean `call`, so the `!` is consumed. Absent a
+					// bang, a one-shot (`&`) runs a single time and never again; a live (`&&`) reruns once
+					// its interval has elapsed. Both gates survive restarts via `lastRun` in controller.json.
+					if (!w.bang && (w.once ? lastRun > 0 : now - lastRun < def.interval)) continue
 					due.push({ control: c, item: w, def, key, label: s.label, dir: s.dir })
 				}
 			}

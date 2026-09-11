@@ -620,10 +620,11 @@ used (not `$1`) so a placeholder never clashes with a `$2`/`:2` lane sigil insid
 
 ## Widgets (`herald-widgets.yaml`)
 
-Optional. A **live status display**, defined like a macro but with a **list of commands** and
-a refresh **interval**. An `&name` line on its own in a `.herald` block reruns those commands
-every `interval` ms and mirrors their combined stdout back into the file, indented below the
-line as `| `-prefixed rows:
+Optional. A **status display**, defined like a macro but with a **list of commands** and
+a refresh **interval**. A `&name` line on its own in a `.herald` block runs those commands and
+mirrors their combined stdout back into the file, indented below the line as `| `-prefixed rows.
+A single `&` runs the commands **once** (a one-shot capture); doubling the sigil to `&&` makes it
+**live** — herald reruns it every `interval` ms:
 
 ```yaml
 pr:
@@ -633,25 +634,31 @@ pr:
     - gh pr checks
 ```
 
-Drop `&pr` under a session and herald keeps its output fresh. **Single-line** output renders
-**inline** on the widget line; **multi-line** output renders as a `| ` block below it:
+Drop `&pr` under a session for a one-off capture, or `&&pr` to keep its output fresh.
+**Single-line** output renders **inline** on the widget line; **multi-line** output renders as a
+`| ` block below it:
 
 ```
 myrepo
 	&pr: Add widgets  OPEN  ✓ all checks passing
-	&deploy
+	&&deploy
 		| staging   ✓ live   v1.2.3
 		| prod      ⏳ rolling out
 ```
 
 Unlike a macro, a widget is **not** a queue item — it never drains, never blocks a lane, and
 gets no `[DONE]` marker; it's just a readout. Commands run in the session's dir via `fish -c`
-(each capped at 15s), and the output is rewritten only when it actually changes. Because the
-block form is `| `-prefixed and terminal escapes (colors, hyperlinks) are stripped, arbitrary
-output — even lines that look like `> prompt` or a worktree header — round-trips as inert plain
-text. The refresh interval is floored at the ~1s tick.
+(each capped at 15s), and the output is rewritten only when it actually changes. A one-shot (`&`)
+runs a single time and is never rerun after; a live (`&&`) widget's refresh interval is floored
+at the ~1s tick. Because the block form is `| `-prefixed and terminal escapes (colors,
+hyperlinks) are stripped, arbitrary output — even lines that look like `> prompt` or a worktree
+header — round-trips as inert plain text.
 
-**Arguments** work exactly like macros: `&pr 2500` fills `{0}`/`{*}` in the commands. The
+A leading **`!`** forces a **single refresh now** — `!&pr` reruns the widget once this tick,
+whatever the gate would otherwise say, and the `!` is consumed (like a `!` on a prompt). Handy to
+kick a stale one-shot without deleting and re-adding it.
+
+**Arguments** work exactly like macros: `&pr 2500` (or `&&pr 2500`) fills `{0}`/`{*}` in the commands. The
 widgets file is per-machine (gitignored), like `herald-aliases.yaml` / `herald-macros.yaml`.
 
 ## Env overrides

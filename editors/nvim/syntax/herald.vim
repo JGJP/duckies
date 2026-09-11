@@ -14,9 +14,9 @@ syntax match heraldComment /^\s*#.*$/
 " must follow the `@`, so a `@@@…` body line never matches.
 syntax match heraldMacro /^\s*@[0-9A-Za-z_-]\+\%(\s.*\)\?$/
 
-" Widget call: a `&name [args]` line — a live status display the controller reruns on an
-" interval, mirroring its output below as `| ` lines. A name char must follow the `&`.
-syntax match heraldWidget /^\s*&[0-9A-Za-z_-]\+\%([:[:space:]].*\)\?$/
+" Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines.
+" A single `&` runs once; `&&` reruns on the widget's interval. A name char follows the sigil.
+syntax match heraldWidget /^\s*&\+[0-9A-Za-z_-]\+\%([:[:space:]].*\)\?$/
 
 " Session header: a column-0 (non-tab, non-`#`) line. A leading `!` = "show it now"
 " (matched by heraldShowNow below).

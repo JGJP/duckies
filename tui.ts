@@ -285,9 +285,9 @@ function colorsFor(line: string): (string | null)[] {
 	if (/^@[\w-]+(?:\s.*)?$/.test(body)) {
 		// Macro call — a name char must follow the `@` (so a `@@@…` body line stays default).
 		fill(lead, n, C.macro)
-	} else if (/^&[\w-]+(?:[\s:].*)?$/.test(body)) {
-		// Widget call — a live `&name` display, styled like a macro but its own hue. Matches the
-		// inline-output form too (`&name: …`), so the whole line reads as one widget unit.
+	} else if (/^&+[\w-]+(?:[\s:].*)?$/.test(body)) {
+		// Widget call — a `&name` (once) or `&&name` (live) display, styled like a macro but its own
+		// hue. Matches the inline-output form too (`&name: …`), so the whole line reads as one unit.
 		fill(lead, n, C.widget)
 	} else if ((m = low.match(/^(prompt)?:+\d*/))) {
 		fill(lead, lead + m[0].length, C.promptSigil)
