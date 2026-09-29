@@ -1794,6 +1794,15 @@ export interface Window {
 	n: number
 }
 const windowOf = (p: Prompt): Window => ({ kind: p.isCmd ? 'shell' : 'claude', n: p.pane })
+// The window a macro item is (or was last) actioning: the pane of the step its cursor sits on
+// while [EXECUTING], or its last step once [DONE] (the cursor resets to 0 on finish, so it can't
+// be read back). A non-macro (or a step-less macro) just uses its own window. Lets a `!` reveal
+// land on the shell when the macro's current `$` step is what ran, not always the claude pane.
+const macroWindow = (p: Prompt, macroStep: number | undefined): Window => {
+	if (!p.isMacro || !p.steps?.length) return windowOf(p)
+	const idx = p.desiredKind === 'DONE' ? p.steps.length - 1 : Math.min(macroStep ?? 0, p.steps.length - 1)
+	return { kind: p.steps[idx].isCmd ? 'shell' : 'claude', n: p.pane }
+}
 export interface Dispatch {
 	type: DispatchType
 	text?: string
@@ -1885,11 +1894,11 @@ const lastTaskWindow = (s: Session, showOrder: number): Window => {
 // [NEEDS ATTENTION]), else the most recently [DONE] one (the top-most, since the queue
 // drains bottom-to-top). Undefined when nothing has run yet. Points a header `!` at
 // the right window.
-export const frontierWindow = (s: Session): Window | undefined => {
-	const active = s.prompts.find((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION')
+export const frontierWindow = (s: Session, lanes?: Record<number, { macroStep?: number }>): Window | undefined => {
+	const active = s.prompts.find((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'WAITING')
 	const done = s.prompts.filter((p) => p.desiredKind === 'DONE').sort((a, b) => a.order - b.order)[0]
 	const item = active ?? done
-	return item ? windowOf(item) : undefined
+	return item ? macroWindow(item, lanes?.[item.pane]?.macroStep) : undefined
 }
 
 // The distinct lanes (pane numbers) present in a session, ascending. Each is planned
@@ -2180,12 +2189,12 @@ async function tick(rt: Rt) {
 		for (const s of sessions) {
 			if (RESERVED.has(s.label) || !live.has(s.label)) continue
 			if (s.showNow && !s.showNowFired) {
-				await showSession(s.label, frontierWindow(s))
+				await showSession(s.label, frontierWindow(s, rt[s.label]?.lanes))
 				s.showNowFired = true
 			}
 			for (const p of s.prompts) {
 				if (!p.showNow || p.showNowFired) continue
-				await showSession(s.label, windowOf(p))
+				await showSession(s.label, macroWindow(p, rt[s.label]?.lanes?.[p.pane]?.macroStep))
 				p.showNowFired = true
 			}
 		}

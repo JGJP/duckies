@@ -918,6 +918,19 @@ check('executing wins over a done item below it', fw('!alpha\n\t: work\n\t\t[EXE
 check('with nothing executing, the last [DONE] wins', fw('!alpha\n\t$ built\n\t\t[DONE]\n') === 'shell', String(fw('!alpha\n\t$ built\n\t\t[DONE]\n')))
 check('frontier window is undefined when nothing has run', fw('!alpha\n\t: pending\n') === undefined, String(fw('!alpha\n\t: pending\n')))
 
+// A `!` in front of a running @macro reveals the window of the step it's actually on — its
+// shell while a `$` step runs, its claude pane while a prompt step runs — using the lane's
+// macroStep cursor. Once [DONE] the cursor is reset, so it falls back to the macro's last step.
+// mixed runs bottom-to-top: build (step 0, claude) → deploy (step 1, shell).
+const mixedMac = { mixed: '$ deploy\n: build\n' }
+const mfw = (s: string, macros: Record<string, string>, lanes?: Record<number, { macroStep?: number }>) =>
+	frontierWindow(parse(s, {}, macros).sessions[0], lanes)?.kind
+check('executing macro on a $ step reveals the shell', mfw('!app\n\t@mixed\n\t\t[EXECUTING]\n', mixedMac, { 1: { macroStep: 1 } }) === 'shell', String(mfw('!app\n\t@mixed\n\t\t[EXECUTING]\n', mixedMac, { 1: { macroStep: 1 } })))
+check('executing macro on a prompt step reveals claude', mfw('!app\n\t@mixed\n\t\t[EXECUTING]\n', mixedMac, { 1: { macroStep: 0 } }) === 'claude', String(mfw('!app\n\t@mixed\n\t\t[EXECUTING]\n', mixedMac, { 1: { macroStep: 0 } })))
+check('executing macro with no lane state defaults to its first step', mfw('!app\n\t@mixed\n\t\t[EXECUTING]\n', mixedMac) === 'claude', String(mfw('!app\n\t@mixed\n\t\t[EXECUTING]\n', mixedMac)))
+check('done macro reveals its last step (cursor reset, $ last)', mfw('!app\n\t@mixed\n\t\t[DONE]\n', mixedMac, { 1: { macroStep: 0 } }) === 'shell', String(mfw('!app\n\t@mixed\n\t\t[DONE]\n', mixedMac, { 1: { macroStep: 0 } })))
+check('done macro whose last step is a prompt reveals claude', mfw('!app\n\t@endsClaude\n\t\t[DONE]\n', { endsClaude: ': build\n$ deploy\n' }) === 'claude', String(mfw('!app\n\t@endsClaude\n\t\t[DONE]\n', { endsClaude: ': build\n$ deploy\n' })))
+
 // A `show` sitting above a `#` barrier waits: the barrier halts the drain before it.
 const showBehindBarrier = drain('alpha\n\tshow\n\t# manual\n\t: first\n')
 check('show above a `#` barrier does not fire (barrier halts first)', !showBehindBarrier.order.includes('show') && JSON.stringify(showBehindBarrier.order) === JSON.stringify(['prompt:first']), JSON.stringify(showBehindBarrier.order))
