@@ -226,12 +226,13 @@ export function macroSteps(body: string, args: string[]): MacroStep[] {
 
 // ---------------------------------------------------------------- parse model
 
-type Kind = 'EXECUTING' | 'DONE' | 'ATTENTION' | 'ERROR'
+type Kind = 'EXECUTING' | 'DONE' | 'ATTENTION' | 'ERROR' | 'WAITING'
 const MARKER: Record<Kind, string> = {
 	EXECUTING: '[EXECUTING]',
 	DONE: '[DONE]',
 	ATTENTION: '[NEEDS ATTENTION]',
 	ERROR: '[ERROR]',
+	WAITING: '[WAITING]',
 }
 interface Prompt {
 	text: string
@@ -654,9 +655,11 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 					? 'ATTENTION'
 					: /error/i.test(body)
 						? 'ERROR'
-						: /done/i.test(body)
-							? 'DONE'
-							: null
+						: /waiting/i.test(body)
+							? 'WAITING'
+							: /done/i.test(body)
+								? 'DONE'
+								: null
 			// A status marker attaches to the nearest preceding prompt (in this container)
 			// without a marker; anything unrecognised (e.g. [NO DIR …]) is a session marker.
 			const owner = kind ? [...target.prompts].reverse().find((p) => !p.marker && !p.isBarrier && !p.isShow) : undefined
@@ -911,11 +914,11 @@ export function planCapture(s: Session, n: number, items: CaptureItem[]): { at: 
 		return [`${indent}:${sig} ${first}`, ...more.map((r) => `${indent}|${r === '' ? '' : ` ${r}`}`)]
 	}
 	const prompts = items.filter((it) => !it.isCmd)
-	// A finished command captured while a live prompt still holds the lane's [EXECUTING] marker
-	// (its claude turn is running in the other pane): log the command(s) as already-run rows just
-	// below that prompt, without stealing its marker — the shell and claude panes run at once, so
-	// the prompt must stay the tracked frontier.
-	if (!prompts.length && frontier?.desiredKind === 'EXECUTING') {
+	// A finished command captured while a live prompt still holds the lane's [EXECUTING]/[WAITING]
+	// marker (its claude turn is running — or backgrounded and about to resume — in the other
+	// pane): log the command(s) as already-run rows just below that prompt, without stealing its
+	// marker — the shell and claude panes run at once, so the prompt must stay the tracked frontier.
+	if (!prompts.length && (frontier?.desiredKind === 'EXECUTING' || frontier?.desiredKind === 'WAITING')) {
 		const at = (frontier.marker?.lineIdx ?? frontier.bodyEndIdx) + 1
 		return { at, lines: [...items].reverse().flatMap(render), clear: null, executing: false }
 	}
@@ -1031,6 +1034,10 @@ const saveRt = (rt: Rt) => {
 
 interface StateEvent {
 	event: string
+	// The hook's `notification_type` when event === 'Notification'. `idle_prompt` (Claude's
+	// "waiting for your input" nudge fired after ~60s idle) is benign — it arrives *after* the
+	// turn's Stop, so it must not be mistaken for a mid-task block. Absent for non-Notification.
+	notify?: string
 	mtimeMs: number
 }
 // Done-files are per lane. Lane 1 keeps the bare `<label>.json`/`<label>.cmd` names
@@ -1041,8 +1048,8 @@ const statePath = (label: string, n: number) => join(STATE, `${label}${paneSuffi
 function readState(label: string, n: number): StateEvent | null {
 	const p = statePath(label, n)
 	try {
-		const event = JSON.parse(readFileSync(p, 'utf8')).event as string
-		return { event, mtimeMs: statSync(p).mtimeMs }
+		const parsed = JSON.parse(readFileSync(p, 'utf8'))
+		return { event: parsed.event as string, notify: parsed.raw?.notification_type as string | undefined, mtimeMs: statSync(p).mtimeMs }
 	} catch {
 		return null
 	}
@@ -1297,20 +1304,43 @@ async function claudePane(label: string, n = 1): Promise<string> {
 }
 const shellPane = (label: string, n = 1) => paneFor(label, 'shell', n)
 
-// Whether the lane's claude pane is mid-turn, read from the live TUI's spinner line:
+// Whether a captured claude pane is mid-turn, read from the live TUI's spinner line:
 // while a turn runs Claude Code pins a `<glyph> <Gerund>… (<elapsed> · …)` status above the
 // input box (e.g. `✳ Sock-hopping… (42s · ↓ 2.7k tokens)`). We anchor on a line that STARTS
 // with a lone spinner glyph whose next token ends in `…(`, which excludes both the idle
 // end-of-turn summary (`✻ Baked for 6m 55s` — no ellipsis/paren) and transcript prose that
 // merely quotes a spinner (an assistant `⏺ …the pane shows Channelling… (18s)` line starts
 // with text, not a lone glyph). The "esc to interrupt" hint is unreliable — it's dropped on
-// extended-thinking turns. true = working, false = idle, null = pane unreadable.
-async function claudeBusy(label: string, n: number): Promise<boolean | null> {
+// extended-thinking turns.
+export const paneWorking = (out: string): boolean => /^\s*[^\w\s]\s+\S*…\s*\(/m.test(out)
+// Whether a captured claude pane has background tasks that will resume it on their own. While a
+// backgrounded shell/task runs, Claude Code shows a `· <n> shells` segment in the *live* status
+// footer (`⏵⏵ bypass permissions on · 2 shells · ← for agents`). When the turn has ended (pane
+// idle) but that segment is present, the turn isn't finished — the background task fires a
+// `<task-notification>` that resumes claude with no hook, so the lane must not be latched [DONE].
+//
+// The footer is the only authoritative source: it's the bottom-most rendered line, redrawn every
+// frame, and its `· <n> shells` segment vanishes the instant the count hits zero. The rest of the
+// pane is untrustworthy — a prior turn's `✻ Cogitated for 58s · 2 shells still running` summary
+// carries the same text but is a historical log line that scrolls up and lingers, and a session
+// that discusses herald itself has conversation text quoting `· N shells`. Both would false-
+// positive. So look only at the last few non-empty lines (the footer + status line), and still
+// exclude the `… shells still running` summary form as a belt-and-suspenders guard.
+export const paneBackgroundRunning = (out: string): boolean => {
+	const lines = out.split('\n').filter((l) => l.trim() !== '')
+	return lines.slice(-3).some((l) => /·\s*\d+\s+shells?\b/.test(l) && !/shells?\s+still\s+running\b/.test(l))
+}
+// Read a lane's claude pane once and classify it. true/false per signal, null if unreadable.
+async function readClaudePane(label: string, n: number): Promise<{ busy: boolean; background: boolean } | null> {
 	const pane = await paneFor(label, 'claude', n)
 	if (pane === null) return null
 	const r = await $({ nothrow: true, quiet: true })`tmux capture-pane -p -t ${pane}`
 	if (r.exitCode !== 0) return null
-	return /^\s*[^\w\s]\s+\S*…\s*\(/m.test(r.stdout)
+	return { busy: paneWorking(r.stdout), background: paneBackgroundRunning(r.stdout) }
+}
+// Just the busy bit — for the reap gate, which only needs "don't kill a working pane".
+async function claudeBusy(label: string, n: number): Promise<boolean | null> {
+	return (await readClaudePane(label, n))?.busy ?? null
 }
 
 // The pane *only* if it still carries its @herald tag. A tmux-resurrect restore brings a
@@ -1773,7 +1803,7 @@ export interface Dispatch {
 }
 export interface PlanIO {
 	now: number
-	state: { event: string; mtimeMs: number } | null
+	state: { event: string; notify?: string; mtimeMs: number } | null
 	cmdDoneMtime: number | null
 	// Exit status of the just-finished `$command` (see readCmdExit). Non-zero ⇒ the command
 	// failed: mark it [ERROR] and halt the lane instead of draining on. Null/0 ⇒ treat as success.
@@ -1784,6 +1814,11 @@ export interface PlanIO {
 	// own (background task / loop / task-notification) fires no hook, so without this the
 	// prior turn's Stop latches it to [DONE] while it's actually still running.
 	paneBusy?: boolean
+	// Whether the pane has backgrounded shells/tasks still running (the TUI's `· <n> shells`
+	// segment). When a turn ends idle but this holds, the item is [WAITING], not [DONE]: a
+	// `<task-notification>` will resume claude with no hook, so the lane stays held (no dispatch)
+	// until the background work finishes. undefined = unknown/unread.
+	paneBackground?: boolean
 }
 
 // Nearest pending item above `idx` in drain order (the next to run, drain being
@@ -1813,7 +1848,7 @@ const frontierIdx = (s: Session): number => {
 // (no prompts/commands), a fully drained one, or one blocked on a `#` barrier has nothing
 // to input, so we don't spawn a tmux session for it — we only spawn once there's work.
 export const hasPendingInput = (s: Session): boolean => {
-	if (s.prompts.some((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION')) return true
+	if (s.prompts.some((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'WAITING')) return true
 	const next = nearestAbove(s, frontierIdx(s))
 	return next !== null && !next.isBarrier
 }
@@ -1874,11 +1909,11 @@ const laneHasClaude = (s: Session, n: number) => s.prompts.some((p) => p.pane ==
 const laneHasShell = (s: Session, n: number) => s.prompts.some((p) => p.pane === n && (p.isMacro ? macroHasShell(p) : p.isCmd))
 const lanePromptCount = (s: Session, n: number) => s.prompts.filter((p) => p.pane === n && isClaudeItem(p)).length
 
-// Only the frontier item keeps a marker: strip every other [EXECUTING]/[DONE].
+// Only the frontier item keeps a marker: strip every other [EXECUTING]/[DONE]/[WAITING].
 const keepOnly = (s: Session, keep: Prompt | null) => {
 	for (const p of s.prompts) {
 		if (p === keep) continue
-		if (p.desiredKind === 'EXECUTING' || p.desiredKind === 'DONE') p.desiredKind = null
+		if (p.desiredKind === 'EXECUTING' || p.desiredKind === 'DONE' || p.desiredKind === 'WAITING') p.desiredKind = null
 	}
 }
 
@@ -1888,7 +1923,7 @@ const keepOnly = (s: Session, keep: Prompt | null) => {
 // so the frontier turn must run again. No-op (returns false) when nothing is in flight, so a
 // first-time lane spawn isn't disturbed.
 const resetLaneFrontier = (s: Session, n: number, lr: QueueRt): boolean => {
-	const active = s.prompts.filter((p) => p.pane === n && (p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION'))
+	const active = s.prompts.filter((p) => p.pane === n && (p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'WAITING'))
 	if (!active.length) return false
 	for (const p of active) p.desiredKind = null
 	lr.macroStep = 0
@@ -1900,6 +1935,16 @@ const resetLaneFrontier = (s: Session, n: number, lr: QueueRt): boolean => {
 // Decide the next transition for one (spawned, ready) session. Mutates the items'
 // desiredKind and the runtime timers; returns the lines to send this tick. Pure
 // w.r.t. I/O so it can be unit-tested by feeding synthetic events.
+// Claude's `idle_prompt` notification ("waiting for your input") fires ~60s after the pane
+// goes idle — i.e. *after* the turn's Stop. It carries no mid-task meaning, so it's treated
+// as a turn-end signal, never as [NEEDS ATTENTION].
+const isIdleNudge = (st: PlanIO['state']): boolean => !!st && st.event === 'Notification' && st.notify === 'idle_prompt'
+// A genuine block needing a human (permission request, a non-idle notification): flag it.
+const isBlockingNotify = (st: PlanIO['state'], sentAt: number): boolean => !!st && st.event === 'Notification' && st.notify !== 'idle_prompt' && st.mtimeMs > sentAt
+// The turn ended: an explicit Stop, or the post-Stop idle nudge (which stands in when Stop was
+// never observed — e.g. it was overwritten in the state file by the later idle notification).
+const isTurnEnd = (st: PlanIO['state'], sentAt: number): boolean => !!st && (st.event === 'Stop' || isIdleNudge(st)) && st.mtimeMs > sentAt
+
 export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 	const out: Dispatch[] = []
 	const promptCount = s.prompts.filter((p) => isClaudeItem(p)).length
@@ -1955,9 +2000,9 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 		}
 	}
 
-	const active = s.prompts.find((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION')
+	const active = s.prompts.find((p) => p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'WAITING')
 	// The top-most already-run item (the frontier), if any — resurrected below when the
-	// pane is busy again but nothing is marked active.
+	// pane is busy (or backgrounded) again but nothing is marked active.
 	const doneFrontier = s.prompts.filter((p) => p.desiredKind === 'DONE').sort((a, b) => a.order - b.order)[0]
 	if (active) {
 		if (active.isMacro) {
@@ -1989,8 +2034,9 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 				}
 			} else if (step.text.trim() === '/clear') advance()
 			else if (io.paneBusy === true) active.desiredKind = 'EXECUTING'
-			else if (io.state && io.state.event === 'Stop' && io.state.mtimeMs > rt.sentAt) advance()
-			else if (io.state && io.state.event === 'Notification' && io.state.mtimeMs > rt.sentAt) active.desiredKind = 'ATTENTION'
+			else if (isBlockingNotify(io.state, rt.sentAt)) active.desiredKind = 'ATTENTION'
+			else if (io.paneBackground === true) active.desiredKind = 'WAITING'
+			else if (isTurnEnd(io.state, rt.sentAt)) advance()
 			else if (io.state && io.state.event === 'UserPromptSubmit' && io.state.mtimeMs > rt.sentAt) active.desiredKind = 'EXECUTING'
 		} else if (active.isCmd) {
 			if (io.cmdDoneMtime !== null && io.cmdDoneMtime > (rt.cmdSentAt ?? 0)) {
@@ -2016,12 +2062,21 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 			// [EXECUTING]: a resumed turn's earlier Stop must not latch us to [DONE], and a
 			// stale Notification must not flip us to [NEEDS ATTENTION] while Claude runs.
 			active.desiredKind = 'EXECUTING'
-		} else if (io.state && io.state.event === 'Stop' && io.state.mtimeMs > rt.sentAt) {
+		} else if (isBlockingNotify(io.state, rt.sentAt)) {
+			// Claude is blocked waiting for input mid-task (a permission request or other non-idle
+			// notification): flag this prompt. Takes priority over a backgrounded task — a human
+			// must act before anything can resume. The benign idle_prompt nudge is NOT this: it
+			// fires after the turn's Stop, so it flows into the turn-end branch below (→ [DONE]).
+			active.desiredKind = 'ATTENTION'
+		} else if (io.paneBackground === true) {
+			// The turn ended (pane idle) but backgrounded tasks are still running — claude will
+			// resume on its own via a <task-notification> that fires no hook. Hold at [WAITING]
+			// rather than latching [DONE]: don't drain, don't dispatch into a pane about to wake.
+			// Settles to [DONE] once the background work clears (the Stop branch below).
+			active.desiredKind = 'WAITING'
+		} else if (isTurnEnd(io.state, rt.sentAt)) {
 			active.desiredKind = 'DONE'
 			drainUp(active.order, active)
-		} else if (io.state && io.state.event === 'Notification' && io.state.mtimeMs > rt.sentAt) {
-			// Claude is blocked waiting for input mid-task: flag this prompt.
-			active.desiredKind = 'ATTENTION'
 		} else if (io.state && io.state.event === 'UserPromptSubmit' && io.state.mtimeMs > rt.sentAt) {
 			// A prompt was submitted into the pane — the user answered a blocking
 			// question — so Claude is working again: clear [NEEDS ATTENTION] back to
@@ -2034,6 +2089,12 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 		// task-notification — none fire a hook). Re-reflect it as running, and dispatch
 		// nothing into a busy pane. It settles back to [DONE] once the pane goes idle.
 		doneFrontier.desiredKind = 'EXECUTING'
+		keepOnly(s, doneFrontier)
+	} else if (io.paneBackground === true && doneFrontier) {
+		// Idle pane, but backgrounded tasks are still running under a frontier we'd marked
+		// [DONE] (e.g. herald restarted while a loop slept between resumes). Reflect the
+		// pending self-resume as [WAITING] and hold — don't dispatch into a pane about to wake.
+		doneFrontier.desiredKind = 'WAITING'
 		keepOnly(s, doneFrontier)
 	} else if (io.paneBusy === true) {
 		// Busy pane but nothing has run yet (e.g. a manual turn): don't feed it a prompt.
@@ -2325,17 +2386,22 @@ async function tick(rt: Rt) {
 			const hadActiveCmd = s.prompts.some((p) => p.pane === n && p.isCmd && p.desiredKind === 'EXECUTING')
 			const cmdDoneMtime = readCmdDone(label, n)
 			const cmdDoneExit = cmdDoneMtime !== null ? readCmdExit(label, n) : null
-			// Poll the claude pane's live busy state (lanes with prompts only; `$`-only lanes
+			// Poll the claude pane's live state once (lanes with prompts only; `$`-only lanes
 			// have no claude pane). null (unreadable) ⇒ undefined so the planner falls back to
-			// pure hook-driven behavior rather than acting on a bad read.
-			const paneBusy = !DRY && laneHasClaude(s, n) ? ((await claudeBusy(label, n)) ?? undefined) : undefined
+			// pure hook-driven behavior rather than acting on a bad read. `background` = the pane
+			// has backgrounded tasks that will resume it (→ [WAITING], not [DONE]).
+			const pane = !DRY && laneHasClaude(s, n) ? ((await readClaudePane(label, n)) ?? undefined) : undefined
+			const paneBusy = pane?.busy
+			const paneBackground = pane?.background
 			const state = readState(label, n)
 			// A finished `:` prompt (fresh Stop, pane idle) gets a one-line `-> ` summary mirrored
 			// below it. Capture it now — before planQueue advances the queue and dispatches any next
 			// prompt at tick's end — so the transcript still reflects the turn that just ended. Same
 			// freshness/paneBusy gate planQueue uses to latch [DONE]; the `!p.note` guard makes it
 			// fire once (a lingering stale Stop is ignored after the line lands). Plain prompts only.
-			if (!DRY && state?.event === 'Stop' && state.mtimeMs > lr.sentAt && paneBusy !== true) {
+			// Not while backgrounded tasks still run: the turn is [WAITING], not finished, so
+			// its `-> ` summary would be premature (it settles to [DONE] once they clear).
+			if (!DRY && isTurnEnd(state, lr.sentAt) && paneBusy !== true && paneBackground !== true) {
 				const done = s.prompts.find(
 					(p) => p.pane === n && p.desiredKind === 'EXECUTING' && !p.isCmd && !p.isMacro && !p.isBarrier && !p.isShow && !p.note && p.text.trim() !== '/clear',
 				)

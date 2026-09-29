@@ -164,7 +164,13 @@ moonbase-2
   and advances it to `[DONE]` when Claude signals it finished (the hook's Stop
   event). `[NEEDS ATTENTION]` replaces the marker when Claude blocks waiting for
   input mid-task; answering it (submitting a prompt into the pane) flips it back to
-  `[EXECUTING]`.
+  `[EXECUTING]`. `[WAITING]` marks a turn that has ended but left **backgrounded
+  tasks running** (e.g. a `/watch-pr-comments` loop polling CI): the pane's `· N
+  shells` indicator tells herald a `<task-notification>` will resume Claude on its
+  own (no hook fires), so the item is held — not latched `[DONE]`, and the next
+  queued item is not dispatched into a pane that's about to wake. It oscillates
+  `[WAITING]`↔`[EXECUTING]` as the loop wakes, and settles to `[DONE]` only once the
+  background work clears.
 - **One-line summary (`->`).** When a `:` prompt finishes, herald mirrors a one-line
   recap of the turn into the file just below the prompt, prefixed with `-> ` (at the
   marker's indent). Every herald-launched Claude is asked — via a combined system-prompt

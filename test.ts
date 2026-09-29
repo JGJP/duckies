@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, parse, planCapture, planQueue, reapTargets, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
+import { aliasWorktree, applyOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 
 let failures = 0
@@ -423,6 +423,24 @@ const attn = (() => {
 })()
 check('notification flags [NEEDS ATTENTION], later stop resolves it', attn.flagged && attn.content.includes('[DONE]') && !attn.content.includes('[NEEDS ATTENTION]'), JSON.stringify(attn))
 
+// The `idle_prompt` notification (Claude's "waiting for your input" nudge, fired ~60s after the
+// pane goes idle — i.e. after the turn's Stop) is benign: it must resolve the prompt to [DONE],
+// NOT flag [NEEDS ATTENTION]. Regression for a finished turn flipping back to attention when the
+// idle notification overwrote the Stop in the state file.
+const idleNudge = (() => {
+	let content = 'alpha\n\t: fix the bug\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch
+	step({ now: 200, state: { event: 'Notification', notify: 'idle_prompt', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false }) // idle nudge, not a block
+	return { content }
+})()
+check('idle_prompt notification resolves to [DONE], never [NEEDS ATTENTION]', idleNudge.content.includes('[DONE]') && !idleNudge.content.includes('[NEEDS ATTENTION]'), JSON.stringify(idleNudge))
+
 // Answering a [NEEDS ATTENTION] prompt (a UserPromptSubmit event) flips it back to
 // [EXECUTING]; a later Stop then completes it as usual.
 const answered = (() => {
@@ -483,6 +501,48 @@ const resume = (() => {
 	return { done, reExecuting, content }
 })()
 check('a self-resumed [DONE] pane re-shows [EXECUTING], then settles back to [DONE]', resume.done && resume.reExecuting && resume.content.includes('[DONE]'), JSON.stringify(resume))
+
+// Background hold: a turn that ends idle while backgrounded tasks still run (the pane's
+// `· N shells` segment, surfaced as paneBackground) is [WAITING], not [DONE] — a
+// <task-notification> will resume it with no hook. It must not drain to the next item; it
+// oscillates [WAITING]↔[EXECUTING] as the loop wakes, and only settles [DONE] once the
+// background work clears.
+const bgWait = (() => {
+	let content = 'alpha\n\t: after this one\n\t: watch the PR\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 2 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch bottom `watch the PR`
+	step({ now: 200, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false, paneBackground: true }) // idle but shells: [WAITING]
+	const waiting = content.includes('[WAITING]') && !content.includes('[DONE]')
+	const held = !content.includes('after this one\n\t\t[EXECUTING]') // next item NOT dispatched into the waiting pane
+	step({ now: 300, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: true }) // background fired: resumed
+	const reExecuting = content.includes('[EXECUTING]') && !content.includes('[WAITING]')
+	step({ now: 400, state: { event: 'Stop', mtimeMs: 350 }, cmdDoneMtime: null, paneBusy: false, paneBackground: false }) // shells gone: done → next dispatches
+	return { waiting, held, reExecuting, content }
+})()
+check('an idle turn with background tasks holds at [WAITING], not [DONE], and blocks the next item', bgWait.waiting && bgWait.held && bgWait.reExecuting, JSON.stringify(bgWait))
+
+// A macro whose prompt step spawns a background loop (e.g. @wcc's /watch-pr-comments) must
+// not advance to the next step while the watch is still running: an idle turn with
+// backgrounded tasks holds the macro at [WAITING] on the current step until they clear.
+const bgMacro = (() => {
+	const macros = { wcc: ': /clear\n: /watch-pr-comments\n' } // reversed → step 0 = the watch prompt
+	let content = 'alpha\n\t@wcc\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1, macroStep: 0 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content, {}, macros)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch step 0 (/watch-pr-comments)
+	step({ now: 200, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false, paneBackground: true }) // idle + shells
+	return { onStepZero: rt.macroStep === 0, waiting: content.includes('[WAITING]'), content }
+})()
+check('a macro prompt step with background tasks holds at [WAITING] and does not advance', bgMacro.onStepZero && bgMacro.waiting, JSON.stringify(bgMacro))
 
 // Multiline prompt: lines indented deeper than a `:` line fold into that prompt's text and
 // dispatch as one `\n`-joined block; there's still only one queue item, and its completion
@@ -1210,6 +1270,34 @@ check(
 	check('stripAnsi keeps an OSC 8 hyperlink label, drops the escapes', stripAnsi(linked) === '#79')
 	check('stripAnsi keeps ✓/✗ glyphs and tabs/newlines', stripAnsi(`${ESC}[32m✓${ESC}[m\tCI\n✗ x`) === '✓\tCI\n✗ x')
 	check('stripAnsi drops stray carriage returns', stripAnsi('a\r\nb') === 'a\nb')
+
+	// paneBackgroundRunning keys off the LIVE footer segment, not the historical end-of-turn
+	// summary — a prior turn's `✻ … · N shells still running` lingers in scrollback and must not
+	// report background work after those shells were killed.
+	check('live footer `· 2 shells` reports background running', paneBackgroundRunning('⏵⏵ bypass permissions on · 2 shells · ← for agents'))
+	check('idle footer with no shells segment reports nothing', !paneBackgroundRunning('-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'))
+	check(
+		'a stale `· N shells still running` summary alone does NOT report background',
+		!paneBackgroundRunning('✻ Brewed for 1m 44s · 2 shells still running\n❯ \n-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'),
+	)
+	check(
+		'a live footer segment still reports even alongside a stale summary',
+		paneBackgroundRunning('✻ Brewed for 1m 44s · 2 shells still running\n⏵⏵ bypass permissions on · 1 shell · ← for agents'),
+	)
+	// Meta case: a session discussing herald has conversation text quoting `· N shells` up in the
+	// scrollback. Only the live footer counts, so that quoted text must not report background work.
+	const metaPane = [
+		'⏺ This is the meta-bug. paneBackgroundRunning matched my own text quoting · 2 shells and',
+		'  the footer format `⏵⏵ bypass permissions on · 2 shells · ← for agents`.',
+		'✻ Worked for 40s',
+		'',
+		'────────────────',
+		'❯ ',
+		'────────────────',
+		'  Opus 4.8 (1M context) | $4.71 | █░░░░░░░░░ 11% of 1000k | fix it',
+		'  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)',
+	].join('\n')
+	check('conversation text quoting `· N shells` does NOT report background (live footer is clean)', !paneBackgroundRunning(metaPane))
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
