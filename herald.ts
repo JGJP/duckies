@@ -1492,8 +1492,11 @@ async function doSpawn(label: string, dir: string) {
 
 // Create a detached-HEAD git worktree of `base` at `dir` (its parent dirs made first), then
 // run the base repo's worktree setup — copy files/dirs in from `base` (`worktree/copy`, e.g.
-// a gitignored `.env`), then run its commands in the worktree (`worktree/cmd`, e.g. install) —
-// and spawn the session in it. Runs once, the first tick a worktree session has work.
+// a gitignored `.env`), spawn the session in it, then type its commands (`worktree/cmd`, e.g.
+// install) into the session's own tmux shell so they run in the real pane (visible, with the
+// pane's full env) rather than in the supervisor process. Runs once, the first tick a worktree
+// session has work; the readiness grace holds queued `$commands` off until the shell is idle,
+// so any queued command lands after the setup it depends on.
 async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg: { cmd?: string[]; copy?: string[] } = {}) {
 	log(`worktree add ${dir} (from ${base})`)
 	if (DRY) return
@@ -1519,16 +1522,17 @@ async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg
 			log(`WARN worktree ${T(label)}: copy failed for ${rel}: ${(e as Error).message}`)
 		}
 	}
-	// Run each setup command in the worktree. Prefer the user's login shell (`$SHELL -lc`) so
-	// PATH and env managers (asdf/nvm/direnv) apply the way they do in a real pane; fall back
-	// to `sh -c` if `$SHELL` is unset.
-	const sh = $({ cwd: dir, nothrow: true, quiet: true })
-	for (const cmd of cfg.cmd ?? []) {
-		log(`worktree ${T(label)}: run ${JSON.stringify(cmd)}`)
-		const rr = process.env.SHELL ? await sh`${process.env.SHELL} -lc ${cmd}` : await sh`sh -c ${cmd}`
-		if (rr.exitCode !== 0) log(`WARN worktree ${T(label)}: cmd failed (exit ${rr.exitCode}): ${cmd}`)
-	}
+	// Spawn the session first so its shell window exists, then type each setup command into that
+	// shell (via sendCmd, the same path `$command` items use). They run in the real pane — the
+	// user sees them, and they get the pane's login/interactive env (PATH, asdf/nvm/direnv) — and
+	// the shell reads them in order, so a queued `$command` (held off by the boot grace) follows.
 	await doSpawn(label, dir)
+	const cmds = cfg.cmd ?? []
+	if (cmds.length) await sleep(500) // let the fresh shell finish sourcing its rc before typing
+	for (const cmd of cmds) {
+		log(`worktree ${T(label)}: setup ${JSON.stringify(cmd)}`)
+		await sendCmd(label, cmd, 1)
+	}
 }
 
 // A labeled base that isn't a git repo can't be worktree'd, so instead point the same

@@ -555,8 +555,7 @@ header that isn't a listed alias falls back to the path / bare-name rules above.
 ### Per-repo worktree setup
 
 Give an alias the **object form** to run setup when a [worktree](#the-herald-files) of that
-repo is first created (right after `git worktree add`, before the session spawns; inherited
-by nested worktrees):
+repo is first created (right after `git worktree add`; inherited by nested worktrees):
 
 ```yaml
 webapp:
@@ -569,9 +568,10 @@ webapp:
     - direnv allow
 ```
 
-`worktree/copy` runs first (a missing source warns and is skipped), then `worktree/cmd` runs
-in the worktree via your login shell (`$SHELL`). Both are skipped in `--dry-run`. Note the
-setup runs inline during that tick, so a slow `install` briefly delays the supervisor loop.
+`worktree/copy` runs first (a missing source warns and is skipped), then the session spawns and
+`worktree/cmd` is typed into its own tmux **shell** window — the commands run in the real pane,
+so you can watch them and they get that shell's full env (PATH, asdf/nvm/direnv). Both are
+skipped in `--dry-run`. Queued `$commands` wait out the boot grace, so they land after setup.
 
 ## Macros (`herald-macros.yaml`)
 
