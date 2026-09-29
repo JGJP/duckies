@@ -2113,12 +2113,18 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 	// forever. Fire any such stranded clear here regardless of where the frontier sits: it's
 	// eligible the moment nothing below it in the lane is still pending, running, errored, or
 	// walled off by a barrier (any of which means the run below it hasn't actually completed).
+	const frontier = frontierIdx(s)
 	for (const c of s.prompts) {
 		if (!c.isClear || c.fired) continue
+		// When a finished run sits *above* the `%` (frontier before it), the climbing drain will
+		// never reach the items below it — so a pending, never-run one there can't ever complete;
+		// it's dead cruft this `%` exists to sweep, not a reason to wait. Only when the drain has
+		// yet to arrive (no run above the `%`) does a pending item below mean an unfinished run.
+		const stranded = frontier < c.order
 		const blockedBelow = s.prompts.some(
 			(p) =>
 				p.order > c.order &&
-				(p.isBarrier || p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'ERROR' || (p.desiredKind === null && !p.isShow && !p.isClear)),
+				(p.isBarrier || p.desiredKind === 'EXECUTING' || p.desiredKind === 'ATTENTION' || p.desiredKind === 'WAITING' || p.desiredKind === 'ERROR' || (!stranded && p.desiredKind === null && !p.isShow && !p.isClear)),
 		)
 		if (!blockedBelow) c.fired = true
 	}

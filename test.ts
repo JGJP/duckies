@@ -264,6 +264,14 @@ check('the stranded `%` clears the finished run below it, keeps the frontier abo
 const pendingClr = parse('alpha\n\t: top\n\t%\n\t: pending\n')
 planQueue(pendingClr.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCount: 2, macroStep: 0 }, { now: 100, state: null, cmdDoneMtime: null })
 check('a `%` above an unfinished run does not fire early', pendingClr.sessions[0].prompts.find((p) => p.isClear)!.fired !== true)
+// A `%` stranded below the frontier with never-run `$` commands beneath it: those commands sit
+// below the frontier too, so the climbing drain will never dispatch them — they're dead cruft,
+// not an unfinished run. The stranded `%` must fire and sweep them (else it deadlocks forever).
+const strandedPending = parse('alpha\n\t: top\n\t\t[DONE]\n\t%\n\t$ never runs\n\t$ never runs 2\n')
+planQueue(strandedPending.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCount: 1, macroStep: 0 }, { now: 100, state: null, cmdDoneMtime: null })
+check('a stranded `%` fires over never-run commands below it', strandedPending.sessions[0].prompts.find((p) => p.isClear)!.fired === true)
+const strandedPendingOut = applyOps(strandedPending.lines, buildOps(strandedPending.sessions)).join('\n')
+check('the stranded `%` sweeps the dead commands below it, keeps the frontier', !strandedPendingOut.includes('never runs') && !/^\t%$/m.test(strandedPendingOut) && strandedPendingOut.includes(': top'))
 
 // 5c. `$` command lines parse as one-shot commands (isCmd) separate from prompts.
 const cmds = 'alpha\n\tprompt: do a\n\t$git status\n\t$pnpm test\n'
