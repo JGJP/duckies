@@ -2436,7 +2436,7 @@ async function tick(rt: Rt) {
 					if (summary) done.desiredNote = summary
 				}
 			}
-			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, cmdDoneExit, paneBusy })
+			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, cmdDoneExit, paneBusy, paneBackground })
 			if (hadActiveCmd && cmdDoneMtime !== null && cmdDoneMtime > cmdSentAtBefore) rmCmdDone(label, n)
 			for (const d of dispatches) {
 				// Record what we send so the capture pass can tell it from human input (our sends
