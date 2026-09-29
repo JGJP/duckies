@@ -531,6 +531,22 @@ check(
 	JSON.stringify(steps),
 )
 
+// A quoted arg (single OR double quotes) is one whole arg, quotes stripped — so a multi-word
+// string like a commit message or a file path fills a single `{n}` intact instead of splitting
+// on its spaces. Unquoted tokens still split on whitespace as before.
+const quotedArgs = parse("app\n\t@_wc 'ignore the flaky E2E'\n", {}, { _wc: ': /watch {0}' })
+check(
+	'a single-quoted macro arg fills {0} whole',
+	quotedArgs.sessions[0].prompts[0].steps?.[0].text === '/watch ignore the flaky E2E',
+	JSON.stringify(quotedArgs.sessions[0].prompts[0].steps),
+)
+const dqArgs = parse('app\n\t@m "a b" c\n', {}, { m: ': {0}|{1}' })
+check(
+	'double-quoted arg stays whole, unquoted arg still splits',
+	dqArgs.sessions[0].prompts[0].steps?.[0].text === 'a b|c',
+	JSON.stringify(dqArgs.sessions[0].prompts[0].steps),
+)
+
 // A `@macro` call is ONE queue item: the file keeps the `@name` line and carries a single
 // overall marker, while its steps run bottom-to-top in sequence (the body's LAST line first —
 // here: `: watch` → `$ checkout` → `: prep`), each waiting on its own completion signal. Only

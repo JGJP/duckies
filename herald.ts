@@ -208,7 +208,7 @@ const MACRO_RE = /^([ \t]*)@([\w-]+)(?:[ \t]+(.*\S))?[ \t]*$/
 // runs the widget once (a one-shot capture); `&&` reruns it on the widget's interval (live). The
 // name char must follow the sigil run; the rest is args and/or an inline-output suffix (see parse).
 const WIDGET_RE = /^(&+)([\w-]+)(.*)$/
-const macroArgs = (s: string): string[] => (s.match(/"[^"]*"|\S+/g) ?? []).map((a) => (a.startsWith('"') && a.endsWith('"') ? a.slice(1, -1) : a))
+const macroArgs = (s: string): string[] => (s.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((a) => (/^"[^]*"$|^'[^]*'$/.test(a) ? a.slice(1, -1) : a))
 const fillArgs = (text: string, args: string[]): string => text.replace(/\{\*\}/g, args.join(' ')).replace(/\{(\d+)\}/g, (_, d) => args[+d] ?? '')
 // Expand a macro body into steps, in RUN order: fill args, drop blank and `#` comment lines,
 // classify each remaining line as a `$`command or a prompt, and reverse so they run
