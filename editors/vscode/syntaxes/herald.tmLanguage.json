@@ -24,11 +24,23 @@
 			}
 		},
 		{
-			"comment": "Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines. A single `&` runs once; `&&` reruns on the widget's interval. A name char follows the sigil.",
-			"match": "^[ \\t]*(&+[\\w-]+(?:[ \\t:].*)?)$",
-			"captures": {
-				"1": { "name": "entity.name.function.widget.herald" }
-			}
+			"comment": "Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines. The `&name` line and the `| ` output lines directly under it form one block (painted white-on-dark-grey); the block ends at the first line that is not a `| ` continuation, so a prompt body `|` stays untouched.",
+			"begin": "(?=^[ \\t]*&+[\\w-]+(?:[ \\t:].*)?$)",
+			"end": "^(?!\\t+[ ]*\\|)",
+			"patterns": [
+				{
+					"match": "^[ \\t]*(&+[\\w-]+(?:[ \\t:].*)?)$",
+					"captures": {
+						"1": { "name": "entity.name.function.widget.herald" }
+					}
+				},
+				{
+					"match": "^\\t*(\\t[ ]*\\|.*)$",
+					"captures": {
+						"1": { "name": "markup.other.widget.output.herald" }
+					}
+				}
+			]
 		},
 		{
 			"comment": "Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane/pane.",
@@ -94,6 +106,13 @@
 			"match": "^\\t+ *((?i:\\[[^\\]]*error[^\\]]*\\]))[ ]*$",
 			"captures": {
 				"1": { "name": "invalid.illegal.error.herald" }
+			}
+		},
+		{
+			"comment": "Status marker: [WAITING] (turn ended, but backgrounded tasks will resume claude on their own).",
+			"match": "^\\t+ *((?i:\\[[^\\]]*waiting[^\\]]*\\]))[ ]*$",
+			"captures": {
+				"1": { "name": "markup.other.waiting.herald" }
 			}
 		},
 		{

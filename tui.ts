@@ -268,11 +268,12 @@ const C = {
 	cmdText: fg(51, 153, 255),
 	show: '\x1b[38;5;170m', // keyword-ish accent — no scheme rule to match
 	macro: fg(166, 223, 149), // #a6df95, no background (entity.name.function.macro)
-	widget: fg(102, 217, 224), // #66d9e0, no background (entity.name.function.widget) — a live `&name` display
+	widget: fgbg(255, 255, 255, 51, 51, 51), // white on #333333 — a `&name` display and its `| ` output
 	exec: fgbg(0, 0, 0, 255, 121, 26), // black on #ff791a (constant.language.executing)
 	done: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (markup.inserted.done)
 	attn: fgbg(0, 0, 0, 255, 204, 0), // black on #ffcc00 (invalid.deprecated.attention)
 	error: fgbg(255, 255, 255, 255, 0, 0), // white on #ff0000 (invalid.illegal.error)
+	waiting: fgbg(0, 0, 0, 51, 198, 255), // black on #33c6ff (markup.other.waiting — backgrounded, will self-resume)
 	marker: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (invalid.illegal.marker — [NO DIR …])
 	shownow: fgbg(0, 0, 0, 255, 255, 255), // black on #ffffff (markup.other.shownow)
 	clear: fgbg(0, 0, 0, 255, 230, 0), // black on #ffe600 (markup.other.clear)
@@ -281,8 +282,20 @@ const C = {
 	status: '\x1b[7m',
 }
 
-// Per-character color for one line (null = default). Category order follows the grammar.
-function colorsFor(line: string): (string | null)[] {
+// True when the `|` line at `row` is a widget's output (not a prompt body): walk up over the
+// `|` lines to their owner and check whether it's a `&name` widget line. Mirrors parse(), which
+// attaches a run of `|` lines to the `&name` above them.
+function isWidgetOutput(row: number): boolean {
+	let k = row - 1
+	while (k >= 0 && /^\t*[ ]*\|/.test(lines[k])) k--
+	if (k < 0) return false
+	const owner = lines[k].replace(/^\t*[ ]*/, '')
+	return /^&+[\w-]+(?:[\s:].*)?$/.test(owner)
+}
+
+// Per-character color for one line (null = default). Category order follows the grammar. `row`
+// is the buffer index, needed to tell a widget's `| ` output from an ordinary prompt body.
+function colorsFor(line: string, row: number): (string | null)[] {
 	const n = line.length
 	const col: (string | null)[] = new Array(n).fill(null)
 	const fill = (a: number, b: number, c: string | null) => {
@@ -292,9 +305,18 @@ function colorsFor(line: string): (string | null)[] {
 	const lead = line.match(/^\t+[ ]*/)?.[0].length ?? 0
 	// A `|` line is a multiline prompt-body continuation (YAML block-scalar style): the `|`
 	// reads as a sigil, the rest as prompt text — so a pasted body never looks like a worktree.
-	if (line.startsWith('\t') && line[lead] === '|') {
-		fill(lead, lead + 1, C.promptSigil)
-		fill(lead + 1, n, C.promptText)
+	// (In a de-indented session view the body can sit at column 0, hence no leading-tab guard.)
+	// A `|` below a `&name` widget is that widget's live output instead: paint the run white-on-grey
+	// so it reads as one block with the `&name` line. Start one tab left of the `|` — output sits one
+	// level deeper than its widget, so coloring that extra indent tab lines the block's left edge up
+	// with the `&name` above (which is colored from its own sigil, one indent shallower).
+	if (line[lead] === '|') {
+		if (isWidgetOutput(row)) {
+			fill(lead - 1, n, C.widget)
+		} else {
+			fill(lead, lead + 1, C.promptSigil)
+			fill(lead + 1, n, C.promptText)
+		}
 		return col
 	}
 	const afterIndent = line.replace(/^[ \t]*/, '')
@@ -332,12 +354,17 @@ function colorsFor(line: string): (string | null)[] {
 		fill(lead, n, C.clear)
 	} else if ((m = body.match(/^(\[[^\]]*\])[ ]*$/))) {
 		const inner = m[1].toLowerCase()
-		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : inner.includes('error') ? C.error : C.marker
+		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : inner.includes('error') ? C.error : inner.includes('waiting') ? C.waiting : C.marker
 		fill(lead, lead + m[1].length, c)
+	} else if (body.startsWith('->')) {
+		// A `-> <summary>` note herald mirrored below a finished prompt (see NOTE_RE / the note pass
+		// in herald.ts). Matched before the worktree fallback so it isn't read as a label; painted
+		// muted grey so it reads like the `#` comments, matching the three editor grammars.
+		fill(lead, n, C.comment)
 	} else {
-		// A worktree name (indented non-sigil): a git worktree of the enclosing repo, styled like
-		// the repo header it stands in for. Fill from `lead` (not 0) so the indent isn't underlined
-		// — Sublime scopes only the label text (`\S…`), not the leading tabs.
+		// A non-sigil label: a column-0 session/dir header, or an indented worktree name (a git
+		// worktree of the enclosing repo) — both styled the same. Fill from `lead` (0 for a header)
+		// so an indent isn't underlined — Sublime scopes only the label text (`\S…`), not the tabs.
 		fill(lead, n, C.header)
 	}
 	return col
@@ -657,14 +684,16 @@ function selected(r: number, c: number): boolean {
 
 function buildCells(row: number): Cell[] {
 	const line = lines[row]
-	const colors = colorsFor(line)
+	const colors = colorsFor(line, row)
 	const cells: Cell[] = []
 	for (let i = 0; i < line.length; i++) {
 		const ch = line[i]
 		const sel = selected(row, i)
 		if (ch === '\t') {
 			const w = TAB - (cells.length % TAB)
-			for (let k = 0; k < w; k++) cells.push({ ch: ' ', color: null, sel })
+			// Carry the char's color across the tab's expansion cells so a colored indent (e.g. a
+			// widget block's connecting tab, or a show-now line's full-width flag) paints through.
+			for (let k = 0; k < w; k++) cells.push({ ch: ' ', color: colors[i], sel })
 		} else {
 			cells.push({ ch, color: colors[i], sel })
 		}

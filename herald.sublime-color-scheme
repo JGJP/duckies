@@ -11,8 +11,9 @@
 			"foreground": "#a6df95",
 		},
 		{
-			"scope": "entity.name.function.widget.herald",
-			"foreground": "#66d9e0",
+			"scope": "entity.name.function.widget.herald, markup.other.widget.output.herald",
+			"foreground": "#ffffff",
+			"background": "#333333",
 		},
 		{
 			"scope": "keyword.operator.command.herald, string.unquoted.command.herald",
@@ -46,6 +47,11 @@
 			"scope": "invalid.illegal.error.herald",
 			"foreground": "#ffffff",
 			"background": "#ff0000",
+		},
+		{
+			"scope": "markup.other.waiting.herald",
+			"foreground": "#000000",
+			"background": "#33c6ff",
 		},
 		{
 			"scope": "markup.other.shownow.herald",

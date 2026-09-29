@@ -43,8 +43,12 @@
 						"settings": { "foreground": "#000000", "background": "#FFE600" }
 					},
 					{
-						"scope": "entity.name.function.widget.herald",
-						"settings": { "foreground": "#66D9E0" }
+						"scope": "markup.other.waiting.herald",
+						"settings": { "foreground": "#000000", "background": "#33C6FF" }
+					},
+					{
+						"scope": "entity.name.function.widget.herald, markup.other.widget.output.herald",
+						"settings": { "foreground": "#FFFFFF", "background": "#333333" }
 					}
 				]
 			}

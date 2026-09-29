@@ -36,10 +36,23 @@ contexts:
 
     # Widget call: a `&name [args]` line — a status display, mirroring its output below as `| `
     # lines (see herald-widgets.yaml). A single `&` runs once; `&&` reruns on the widget's interval.
-    # Same shape as a macro call, its own hue via the color scheme. A name char follows the sigil.
+    # The `&name` line and the `| ` output lines directly under it form one block, painted
+    # white-on-dark-grey by the color scheme. Pushing a context lets the output `| ` lines carry
+    # their own scope so a *prompt* body `|` (below) stays untouched. The block ends at the first
+    # line that isn't a `| ` continuation.
     - match: '^[ \t]*(&+[\w-]+(?:[ \t:].*)?)$'
       captures:
         1: entity.name.function.widget.herald
+      push:
+        # Scope the output text plus the ONE extra indent tab it sits under (output is always one
+        # level deeper than its `&name`), so the grey background starts at the same column as the
+        # `&name` above and the two read as one connected block. The widget-depth tabs before that
+        # (`\t*`) stay bare, matching the `&name` line whose capture excludes its own indent.
+        - match: '^\t*(\t[ ]*\|.*)$'
+          captures:
+            1: markup.other.widget.output.herald
+        - match: '^(?!\t+[ ]*\|)'
+          pop: true
 
     # Prompt: `prompt:` or the `:` shorthand. A run of colons or a trailing number
     # (`::`/`:2`) selects the lane/pane. The whole line is one prompt scope (sigil +
@@ -98,6 +111,10 @@ contexts:
     - match: '^\t+[ ]*((?i:\[[^\]]*error[^\]]*\]))[ ]*$'
       captures:
         1: invalid.illegal.error.herald
+    # Turn ended, but backgrounded tasks will resume claude on their own: paused, not done.
+    - match: '^\t+[ ]*((?i:\[[^\]]*waiting[^\]]*\]))[ ]*$'
+      captures:
+        1: markup.other.waiting.herald
     # Anything else in brackets (e.g. [NO DIR …], [DUPLICATE]) is a session marker.
     - match: '^\t+[ ]*(\[[^\n]*\])[ ]*$'
       captures:
