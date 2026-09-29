@@ -1231,10 +1231,18 @@ check(
 	check('running a bang widget rewrites the line without the `!`', applyOps(bang.lines, buildWidgetOps(bang.sessions, bang.lines, new Map([[bw, 'done']]))).join('\n') === 'repo\n\t&pr: done\n')
 	check('a plain widget has no bang', s1.widgets[0].bang === false)
 
-	// An undefined `&name` is left to normal parsing (it becomes a worktree container), so a typo
-	// never silently vanishes as an inert widget.
+	// An undefined `&name` (no `!`) is left to normal parsing (it becomes a worktree container),
+	// so a typo never silently vanishes as an inert widget.
 	const w2 = parse('repo\n\t&nope\n', {}, {}, widgets)
 	check('an undefined &name is not treated as a widget', w2.sessions[0].widgets.length === 0)
+
+	// But a `!&name` refresh-now on an unknown name IS kept as a widget (flagged `unknown`) so the
+	// tick can report `no widget "name"` inline — instead of falling through to a worktree whose
+	// `!` would reveal the session's tmux. The bang widget's clean call drops the `!` on rewrite.
+	const unk = parse('repo\n\t!&nope\n', {}, {}, widgets)
+	const uw = unk.sessions[0].widgets[0]
+	check('a `!&name` on an unknown widget is kept as an unknown widget, not a worktree', unk.sessions[0].widgets.length === 1 && unk.sessions[0].prompts.length === 0 && uw.unknown === true && uw.call === '&nope')
+	check('an unknown bang widget renders `no widget` inline, consuming the `!`', applyOps(unk.lines, buildWidgetOps(unk.sessions, unk.lines, new Map([[uw, 'no widget "nope"']]))).join('\n') === 'repo\n\t&nope: no widget "nope"\n')
 
 	// The `| ` lines below `&pr` are its output block, tracked by range — never parsed as prompts,
 	// even when the content looks like a sigil (`> …`) or a worktree header (`feat`).

@@ -360,6 +360,10 @@ export interface WidgetItem {
 	call: string
 	once: boolean
 	bang: boolean
+	// The `&name` matched no entry in the widget map. Only set for a `!&name` refresh-now on
+	// an unknown name — the tick reports `no widget "name"` inline instead of running anything.
+	// (An unknown `&name` *without* a `!` falls through to worktree parsing, never reaching here.)
+	unknown: boolean
 	inline: boolean
 	lineIdx: number
 	indent: string
@@ -507,7 +511,13 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		// [NO DIR …]) is inserted below the worktree's own block, not the repo's.
 		target.lastChildIdx = i
 		const widgetMatch = t.match(WIDGET_RE)
-		if (widgetMatch && widgets[widgetMatch[2]] !== undefined) {
+		// A known `&name` is always a widget. An unknown one is normally left to fall through to
+		// worktree parsing (so a typo stays visible as an inert line) — EXCEPT when it carries a
+		// leading `!`: an explicit "refresh now" on a name that matches nothing. We keep that as a
+		// widget so the tick can report `no widget "name"` inline, rather than revealing the tmux
+		// (which is what the worktree branch's `showNow` would otherwise do).
+		const knownWidget = widgetMatch !== null && widgets[widgetMatch[2]] !== undefined
+		if (widgetMatch && (knownWidget || leadingBang)) {
 			// A `&name [args]` call: a live display, not a queue item. A single `&` captures the output
 			// once; `&&` reruns on the widget's interval. The tick rewrites the output — inline as
 			// `&name: …` for a single line, or a `| ` block below for several. Split an optional
@@ -524,6 +534,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				call: `${sigil}${widgetMatch[2]}${callArgs}`.trimEnd(),
 				once: sigil.length === 1,
 				bang: leadingBang,
+				unknown: !knownWidget,
 				inline: ci >= 0,
 				lineIdx: i,
 				indent: tabs,
@@ -2471,9 +2482,19 @@ async function tick(rt: Rt) {
 		const now = Date.now()
 		const seen = new Map<string, Map<string, number>>() // label → (widget name → occurrence), for a stable run key
 		const due: { control: Control; item: WidgetItem; def: Widget; key: string; label: string; dir: string }[] = []
+		const outputsByPath = new Map<string, Map<WidgetItem, string>>()
 		for (const c of controls) {
 			for (const s of c.sessions) {
 				for (const w of s.widgets) {
+					if (w.unknown) {
+						// A `!&name` refresh-now on a name that matches no widget: report it inline
+						// (`&name: no widget "name"`) — the rewrite also drops the `!`, consuming the
+						// request without doing anything else.
+						const m = outputsByPath.get(c.path) ?? new Map<WidgetItem, string>()
+						m.set(w, `no widget "${w.name}"`)
+						outputsByPath.set(c.path, m)
+						continue
+					}
 					const def = widgets[w.name]
 					if (!def) continue
 					const perLabel = seen.get(s.label) ?? new Map<string, number>()
@@ -2491,7 +2512,6 @@ async function tick(rt: Rt) {
 				}
 			}
 		}
-		const outputsByPath = new Map<string, Map<WidgetItem, string>>()
 		await Promise.all(
 			due.map(async (d) => {
 				const output = await runWidget(d.def, d.item.args, d.dir)
