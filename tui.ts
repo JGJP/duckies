@@ -145,17 +145,50 @@ export function viewParts(files: HeraldFile[], label: string): ViewPart[] {
 	return top.length ? top : wt
 }
 
-// Compile the view buffer for `label`: each part's lines, in order, concatenated verbatim (so
-// in-block comments, barriers, notes and status markers all carry through), with a worktree's
-// context header prepended.
+// Compile the view buffer for `label`. A top-level view drops each block's column-0 header (the
+// session's dir label, already shown in the status line) and de-indents the body one tab, so the
+// block's items sit flush-left; consecutive blocks are separated by a blank line (a blank ends a
+// block, so planSessionWriteback can split them back apart without the headers). A worktree view
+// keeps its parent repo header as context, then the worktree block verbatim. Either way in-block
+// comments, barriers, notes and status markers all carry through.
 export function compileSession(files: HeraldFile[], label: string): string[] {
 	const view: string[] = []
-	for (const p of viewParts(files, label)) {
-		if (p.header !== null) view.push(p.header)
+	viewParts(files, label).forEach((p, idx) => {
 		const f = files.find((x) => x.path === p.path)!
-		view.push(...f.lines.slice(p.start, p.end + 1))
-	}
+		if (p.header !== null) {
+			view.push(p.header)
+			view.push(...f.lines.slice(p.start, p.end + 1))
+			return
+		}
+		if (idx > 0) view.push('')
+		for (let i = p.start + 1; i <= p.end; i++) view.push(f.lines[i].startsWith('\t') ? f.lines[i].slice(1) : f.lines[i])
+	})
 	return view
+}
+
+// Rebuild the classic `[header, …indented body]` form that the reconciliation in
+// planSessionWriteback expects, from a top-level view compiled header-less and de-indented (see
+// compileSession). Each blank-separated run is one block, re-indented one tab, with its header
+// taken from the matching disk part — a surplus block the user added gets the label as its header,
+// matching a fresh `<label>` block.
+function reindentTopLevel(buffer: string[], parts: ViewPart[], files: HeraldFile[], label: string): string[] {
+	const blocks: string[][] = []
+	let cur: string[] = []
+	for (const l of buffer) {
+		if (l === '') {
+			if (cur.length) blocks.push(cur)
+			cur = []
+			continue
+		}
+		cur.push('\t' + l)
+	}
+	if (cur.length) blocks.push(cur)
+	const out: string[] = []
+	blocks.forEach((b, i) => {
+		const header = i < parts.length ? files.find((f) => f.path === parts[i].path)!.lines[parts[i].start] : label
+		out.push(header, ...b)
+	})
+	return out
 }
 
 // Every top-level session block in a buffer (any label). The view only ever holds this
@@ -179,8 +212,10 @@ function bufferBlocks(buffer: string[]): string[][] {
 export function planSessionWriteback(files: HeraldFile[], label: string, buffer: string[], primaryDir: string): HeraldFile[] {
 	const parts = viewParts(files, label)
 	// In a worktree view every compiled block is prefixed with a context header; strip it back
-	// off so the body maps to the worktree's own on-disk range.
+	// off so the body maps to the worktree's own on-disk range. A top-level view is header-less and
+	// de-indented, so rebuild the classic form (headers + one-tab indent) the pairing expects first.
 	const hasCtx = parts.some((p) => p.header !== null)
+	if (!hasCtx) buffer = reindentTopLevel(buffer, parts, files, label)
 	const bodies = bufferBlocks(buffer).map((b) => (hasCtx ? b.slice(1) : b))
 	const next = new Map(files.map((f) => [f.path, [...f.lines]]))
 	const edits = new Map<string, { start: number; end: number; repl: string[] | null }[]>()
@@ -272,11 +307,6 @@ function colorsFor(line: string): (string | null)[] {
 	// leading-`!` handling and the grammars in the other editors.
 	if (afterIndent.startsWith('!')) {
 		fill(0, n, C.shownow)
-		return col
-	}
-	if (!line.startsWith('\t')) {
-		// column-0 session header.
-		fill(0, n, C.header)
 		return col
 	}
 	const body = line.slice(lead)

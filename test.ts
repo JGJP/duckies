@@ -1158,9 +1158,10 @@ check(
 	const A = { path: '/tmp/a.herald', lines: ['ztest', '\t: do A', '\t\t[DONE]', '', 'other', '\t: unrelated'] }
 	const B = { path: '/tmp/b.herald', lines: ['ztest', '\t: do B', '\t\t[EXECUTING]'] }
 
-	// The view is this label's blocks merged across files, verbatim (markers and all).
+	// The view is this label's blocks merged across files, with each block's dir-label header
+	// dropped and its body de-indented one tab; consecutive blocks are blank-separated.
 	const view = compileSession([A, B], 'ztest')
-	check('compileSession merges a label across files, excluding others', view.join('\n') === ['ztest', '\t: do A', '\t\t[DONE]', 'ztest', '\t: do B', '\t\t[EXECUTING]'].join('\n'))
+	check('compileSession merges a label across files, header-less and de-indented', view.join('\n') === [': do A', '\t[DONE]', '', ': do B', '\t[EXECUTING]'].join('\n'))
 
 	// viewBlocks reports the per-file ranges (A: 0..2, B: 0..2); `other` is not included.
 	const blocks = viewBlocks([A, B], 'ztest')
@@ -1168,7 +1169,7 @@ check(
 
 	// Edit a prompt in the view; only the file that block came from changes, and in place.
 	const edited = [...view]
-	edited[1] = '\t: do A (edited)'
+	edited[0] = ': do A (edited)'
 	const wb1 = planSessionWriteback([A, B], 'ztest', edited, '/tmp')
 	check('writeback rewrites only the edited block’s file', wb1.length === 1 && wb1[0].path === A.path)
 	check('writeback keeps the rest of that file intact', wb1[0].lines.join('\n') === ['ztest', '\t: do A (edited)', '\t\t[DONE]', '', 'other', '\t: unrelated'].join('\n'))
@@ -1176,14 +1177,14 @@ check(
 	// An unchanged view writes nothing back (round-trip is a no-op).
 	check('writeback of an unchanged view changes no files', planSessionWriteback([A, B], 'ztest', view, '/tmp').length === 0)
 
-	// A surplus buffer block appends to the primary file (first that holds the label), blank-separated.
-	const added = [...view, 'ztest', '\t: brand new']
+	// A surplus buffer block (a new blank-separated run) appends to the primary file, blank-separated.
+	const added = [...view, '', ': brand new']
 	const wb2 = planSessionWriteback([A, B], 'ztest', added, '/tmp')
 	const primary = wb2.find((f) => f.path === A.path)!
 	check('a surplus view block appends to the primary file', primary.lines.join('\n') === ['ztest', '\t: do A', '\t\t[DONE]', '', 'other', '\t: unrelated', '', 'ztest', '\t: brand new'].join('\n'))
 
 	// Deleting a block in the view removes it from its file (fewer buffer blocks than disk).
-	const dropped = view.slice(0, 3) // keep only A's block
+	const dropped = view.slice(0, 2) // keep only A's block
 	const wb3 = planSessionWriteback([A, B], 'ztest', dropped, '/tmp')
 	const bFile = wb3.find((f) => f.path === B.path)!
 	check('deleting a view block removes it from its source file', bFile.lines.join('\n') === '')
