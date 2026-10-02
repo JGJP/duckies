@@ -566,6 +566,13 @@ that matches `herald-aliases.yaml` uses the mapped path. See the aliases section
 - A label appearing in multiple files (or twice in one) is merged into a single queue,
   its rows concatenated in filename order; each marker writes back to its own file, and
   session-level state (dir, `[NO DIR …]`, a header `!`) comes from the first file.
+- Conversation resume: the supervisor tracks each lane's Claude conversation id (persisted
+  in `state/controller.json`) and, when it has to (re)spawn a session that isn't live — e.g.
+  you add a prompt after a reboot killed the tmux session — relaunches with `claude --resume`
+  so the prompt lands in the **same conversation**, not a fresh one. `/resume`-ing a different
+  conversation inside the pane is followed automatically (the next hook reports the new id).
+  Deleting the whole session block (a teardown) drops the tracked id, so re-adding it starts
+  fresh. Only applies to `claude` agents; a custom `HERALD_AGENT_CMD` launches as-is.
 
 ## Repo aliases (`herald-aliases.yaml`)
 

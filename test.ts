@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildHeraldOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
+import { aliasWorktree, applyOps, buildHeraldOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 
 let failures = 0
@@ -281,6 +281,15 @@ planQueue(strandedBelowExec.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCo
 check('a `%` below a live [EXECUTING] item fires over the cruft beneath it', strandedBelowExec.sessions[0].prompts.find((p) => p.isClear)!.fired === true)
 const strandedBelowExecOut = applyOps(strandedBelowExec.lines, buildOps(strandedBelowExec.sessions)).join('\n')
 check('the `%` below [EXECUTING] sweeps the run + dead command below it, keeps the executing frontier', !strandedBelowExecOut.includes('doneB') && !strandedBelowExecOut.includes('never runs') && !/^\t%$/m.test(strandedBelowExecOut) && strandedBelowExecOut.includes(': running top'))
+
+// Session resume: a tracked conversation id becomes a `claude --resume <id>` fragment at (re)spawn,
+// so a prompt added to a not-live label reopens the prior conversation. A missing id, a malformed
+// one (guards against injecting shell words), or a non-claude agent yields no flag — a fresh launch.
+check('a valid conversation id resumes', resumeFlag('0199c3de-7f21-7a4b-9c6e-2b1a5f0e9d44') === ' --resume 0199c3de-7f21-7a4b-9c6e-2b1a5f0e9d44')
+check('a short hex id still resumes', resumeFlag('deadbeef') === ' --resume deadbeef')
+check('no id yields no resume flag', resumeFlag(undefined) === '')
+check('a malformed id (spaces/words) is rejected', resumeFlag('; rm -rf / #') === '' && resumeFlag('resume foo') === '')
+check('a non-claude agent never resumes', resumeFlag('0199c3de-7f21-7a4b-9c6e-2b1a5f0e9d44', false) === '')
 
 // 5c. `$` command lines parse as one-shot commands (isCmd) separate from prompts.
 const cmds = 'alpha\n\tprompt: do a\n\t$git status\n\t$pnpm test\n'

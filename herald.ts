@@ -68,11 +68,19 @@ function buildSystemPromptFile(): string {
 	writeFileSync(SYSTEM_PROMPT_FILE, `${base}${NOTE_PROMPT}\n`)
 	return SYSTEM_PROMPT_FILE
 }
+// The `--resume <id>` fragment for a (re)launch, or '' — empty for a non-claude agent, a missing
+// id, or one that doesn't look like a conversation id (a UUID; the guard also keeps a stray value
+// from injecting extra shell words). `claude -r <id>` reopens that conversation by id (reusing its
+// id, since we don't pass --fork-session), so a tracked session is brought back rather than started
+// fresh. Exported for the unit test.
+export const resumeFlag = (resumeId: string | undefined, isClaude = true): string =>
+	isClaude && resumeId && /^[0-9a-f-]{8,}$/i.test(resumeId) ? ` --resume ${resumeId}` : ''
 // Build the combined system-prompt file (base + note instruction) and return the launch line.
-// Non-claude agents (a custom HERALD_AGENT_CMD) launch as-is — the flag wouldn't exist.
-function launchCmd(): string {
+// Non-claude agents (a custom HERALD_AGENT_CMD) launch as-is — the flag wouldn't exist. `resumeId`
+// (a tracked conversation id for this lane) reopens that conversation instead of starting fresh.
+function launchCmd(resumeId?: string): string {
 	if (!AGENT_IS_CLAUDE) return AGENT_CMD
-	return `${AGENT_CMD} --append-system-prompt-file '${buildSystemPromptFile()}'`
+	return `${AGENT_CMD}${resumeFlag(resumeId)} --append-system-prompt-file '${buildSystemPromptFile()}'`
 }
 // HERALD directives: a `HERALD: <prompt>` line in a control file asks a background claude — run in
 // the agent dir (its CLAUDE.md explains the `.herald` format), with the control dir added so it can
@@ -1229,6 +1237,12 @@ interface RtEntry {
 	// worktree up alongside its tmux session.
 	worktreeDir?: string
 	worktreeBase?: string
+	// Per-lane conversation id (lane n → claude `session_id`), captured from each hook payload so a
+	// respawn of a not-live session can `--resume` it instead of starting fresh. Survives restarts
+	// via controller.json and the spawn-reset below (which resets the lanes' timers but keeps this),
+	// so a prompt added after a system restart reopens the prior conversation. Following a `/resume`
+	// is automatic: the next hook carries the new id and overwrites the entry.
+	conv?: Record<number, string>
 	// Per-widget refresh gate, keyed `name#occurrence` within this label: when it last ran, so a
 	// widget only reruns once its `interval` has elapsed (survives restarts via controller.json).
 	widgets?: Record<string, { lastRun: number }>
@@ -1257,6 +1271,10 @@ interface StateEvent {
 	// "waiting for your input" nudge fired after ~60s idle) is benign — it arrives *after* the
 	// turn's Stop, so it must not be mistaken for a mid-task block. Absent for non-Notification.
 	notify?: string
+	// The conversation id (`raw.session_id`) this hook fired for — tracked per lane so a later
+	// respawn can `--resume` it. Follows a `/resume` in the pane automatically: the next hook
+	// carries the new id. Absent if the payload has none.
+	sessionId?: string
 	mtimeMs: number
 }
 // Done-files are per lane. Lane 1 keeps the bare `<label>.json`/`<label>.cmd` names
@@ -1268,7 +1286,7 @@ const statePath = (label: string, n: number) => join(STATE, `${label}${paneSuffi
 function readStateFile(p: string): StateEvent | null {
 	try {
 		const parsed = JSON.parse(readFileSync(p, 'utf8'))
-		return { event: parsed.event as string, notify: parsed.raw?.notification_type as string | undefined, mtimeMs: statSync(p).mtimeMs }
+		return { event: parsed.event as string, notify: parsed.raw?.notification_type as string | undefined, sessionId: parsed.raw?.session_id as string | undefined, mtimeMs: statSync(p).mtimeMs }
 	} catch {
 		return null
 	}
@@ -1775,7 +1793,7 @@ async function runWidget(def: Widget, args: string[], dir: string): Promise<stri
 // HERALD_SHELL to mark a shell as the command-runner, and HERALD_PANE=n (n>1) so the hook
 // suffixes its done-file. A claude pane also launches `claude` (the caller waits out the
 // boot grace before dispatching to it). Returns the new pane id.
-async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: number): Promise<string> {
+async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: number, resumeId?: string): Promise<string> {
 	const tm = $({ nothrow: true, quiet: true })
 	const role = paneRole(kind, n)
 	const env = ['-e', `HERALD_LABEL=${label}`, '-e', `HERALD_STATE=${STATE}`]
@@ -1785,7 +1803,8 @@ async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: n
 	await tm`tmux set-option -p -t ${created} @herald ${role}`
 	if (kind === 'claude') {
 		await sleep(300)
-		await typeInto(created, launchCmd())
+		if (resumeId) log(`resuming ${T(label)}${n > 1 ? `:${n}` : ''} conversation ${resumeId}`)
+		await typeInto(created, launchCmd(resumeId))
 	}
 	return created
 }
@@ -1800,7 +1819,7 @@ async function taggedRoles(label: string): Promise<Set<string>> {
 	return new Set(r.stdout.split('\n').map((x) => x.trim()).filter(Boolean))
 }
 
-async function doSpawn(label: string, dir: string) {
+async function doSpawn(label: string, dir: string, resumeId?: string) {
 	log(`spawning ${T(label)} in ${dir}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
@@ -1815,7 +1834,7 @@ async function doSpawn(label: string, dir: string) {
 	await typeInto(viewPane, viewCmd(label))
 	// claude + shell as their own tagged windows; ensurePaneWindow sets HERALD_LABEL/STATE
 	// per-window, so no session-level env is needed (and none leaks to ad-hoc windows).
-	await ensurePaneWindow(label, dir, 'claude', 1)
+	await ensurePaneWindow(label, dir, 'claude', 1, resumeId)
 	await makeShellWindow(label, dir)
 	// Focus the view window so attaching/revealing the session lands on it first.
 	await tm`tmux select-window -t ${viewPane}`
@@ -1832,7 +1851,7 @@ async function doSpawn(label: string, dir: string) {
 // pane's full env) rather than in the supervisor process. Runs once, the first tick a worktree
 // session has work; the readiness grace holds queued `$commands` off until the shell is idle,
 // so any queued command lands after the setup it depends on.
-async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg: { cmd?: string[]; copy?: string[] } = {}) {
+async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg: { cmd?: string[]; copy?: string[] } = {}, resumeId?: string) {
 	log(`worktree add ${dir} (from ${base})`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
@@ -1861,7 +1880,7 @@ async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg
 	// shell (via sendCmd, the same path `$command` items use). They run in the real pane — the
 	// user sees them, and they get the pane's login/interactive env (PATH, asdf/nvm/direnv) — and
 	// the shell reads them in order, so a queued `$command` (held off by the boot grace) follows.
-	await doSpawn(label, dir)
+	await doSpawn(label, dir, resumeId)
 	const cmds = cfg.cmd ?? []
 	if (cmds.length) await sleep(500) // let the fresh shell finish sourcing its rc before typing
 	for (const cmd of cmds) {
@@ -1875,7 +1894,7 @@ async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg
 // dir that *is* the base, so its commands modify the original files (no isolation — worktree
 // setup copy/cmd is skipped, there being no separate tree to seed). Torn down like a real
 // worktree, except removeWorktree just unlinks the symlink.
-async function linkDirAndSpawn(label: string, base: string, dir: string) {
+async function linkDirAndSpawn(label: string, base: string, dir: string, resumeId?: string) {
 	log(`symlink ${dir} -> ${base}`)
 	if (DRY) return
 	await $({ nothrow: true, quiet: true })`mkdir -p ${dirname(dir)}`
@@ -1885,7 +1904,7 @@ async function linkDirAndSpawn(label: string, base: string, dir: string) {
 		log(`WARN symlink failed for ${T(label)}: ${(e as Error).message}`)
 		return
 	}
-	await doSpawn(label, dir)
+	await doSpawn(label, dir, resumeId)
 }
 
 // Delete the git worktree behind a torn-down session (its line was deleted from the control
@@ -1949,13 +1968,13 @@ async function repairShell(label: string, dir: string, n = 1) {
 // stale window (its claude is already gone) and spawn a fresh, tagged one that relaunches
 // claude. The caller gates on the pane being idle, so a still-working (merely mis-tagged)
 // claude is never killed mid-turn. Leaves the new claude window focused.
-async function repairClaude(label: string, dir: string, n = 1) {
+async function repairClaude(label: string, dir: string, n = 1, resumeId?: string) {
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
 	const stale = await paneFor(label, 'claude', n)
 	log(`repairing ${T(label)} claude${n > 1 ? n : ''}: ${stale ? 'recreating restored window (restoring HERALD_LABEL)' : 'recreating missing window'}`)
 	if (stale) await tm`tmux kill-window -t ${stale}`
-	const created = await ensurePaneWindow(label, dir, 'claude', n)
+	const created = await ensurePaneWindow(label, dir, 'claude', n, resumeId)
 	await tm`tmux select-window -t ${created}`
 }
 
@@ -2689,11 +2708,13 @@ async function tick(rt: Rt) {
 					continue
 				}
 				s.desiredSession = null // clear any stale marker before creating
-				rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, worktreeDir: dir, worktreeBase: base }
+				const conv = rt[label]?.conv // preserve tracked conversation ids across the reset
+				rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, worktreeDir: dir, worktreeBase: base, conv }
+				const resumeId = conv?.[1]
 				if (existsSync(join(base, '.git'))) {
 					const cfg = { cmd: s.worktreeCmd, copy: s.worktreeCopy }
-					actions.push(() => addWorktreeAndSpawn(label, base, dir, cfg))
-				} else actions.push(() => linkDirAndSpawn(label, base, dir))
+					actions.push(() => addWorktreeAndSpawn(label, base, dir, cfg, resumeId))
+				} else actions.push(() => linkDirAndSpawn(label, base, dir, resumeId))
 				continue
 			}
 			s.desiredSession = `[NO DIR ${dir}]`
@@ -2705,8 +2726,9 @@ async function tick(rt: Rt) {
 			// pending `show`, or a `!` "show now" header, also counts — you can't
 			// switch to a session that isn't there yet — so it spawns first.
 			if (!hasPendingInput(s) && !s.showNow) continue
-			rt[label] = { starting: true, startedAt: Date.now(), lanes: {} }
-			actions.push(() => doSpawn(label, dir))
+			const conv = rt[label]?.conv // preserve tracked conversation ids across the reset
+			rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, conv }
+			actions.push(() => doSpawn(label, dir, conv?.[1]))
 			continue
 		}
 		// `!` "show now" reveals (header and per-item) fired up front in the reveal pass, so
@@ -2763,7 +2785,7 @@ async function tick(rt: Rt) {
 					resetLaneFrontier(s, n, lr) // its prior turn died with the restore; run it again
 					lr.starting = true
 					lr.startedAt = Date.now()
-					actions.push(() => repairClaude(label, dir, n))
+					actions.push(() => repairClaude(label, dir, n, re.conv?.[n]))
 					continue
 				}
 				if (lr.starting && Date.now() - lr.startedAt < READY_MS) continue // let claude<N> boot
@@ -2791,6 +2813,10 @@ async function tick(rt: Rt) {
 			const paneBusy = pane?.busy
 			const paneBackground = pane?.background
 			const state = readState(label, n)
+			// Track this lane's conversation id from whatever the latest hook reported, so a later
+			// respawn can --resume it (and a `/resume` in the pane is followed automatically). Kept
+			// even once the session is torn down-and-removed only until rt[label] is deleted.
+			if (state?.sessionId) (re.conv ??= {})[n] = state.sessionId
 			// A finished `:` prompt (fresh Stop, pane idle) gets a one-line `-> ` summary mirrored
 			// below it. Capture it now — before planQueue advances the queue and dispatches any next
 			// prompt at tick's end — so the transcript still reflects the turn that just ended. Same
