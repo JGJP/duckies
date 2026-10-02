@@ -378,6 +378,11 @@ interface Session {
 	// it, so buildOps strips the `!` — a one-shot request.
 	showNow: boolean
 	showNowFired: boolean
+	// A leading `?` on the header or worktree label ("sleep"): tear the session's tmux down but
+	// keep its tracked conversation ids (rt[label].conv), and don't respawn while it's set.
+	// Removing the `?` wakes it — the normal spawn path --resumes the kept conversations. The `?`
+	// stays in the file (buildOps never rewrites the header), so it's a persistent, user-toggled flag.
+	sleep?: boolean
 	// Set only on a merged logical session (a label that appears in >1 file): the
 	// per-file sessions it combines, primary (first file) first. planQueue drives the
 	// merged session; buildOps still runs on each part, and the tick syncs session-level
@@ -549,7 +554,10 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 			const raw = line.trim()
 			// A leading `!` on the header means "show this session immediately".
 			const showNow = leadingBang
-			const header = raw
+			// A leading `?` means "sleep": keep this session torn down (conversations preserved).
+			// Stripped for label/dir resolution; it stays in the file as the user's toggle.
+			const sleep = raw.startsWith('?')
+			let header = sleep ? raw.slice(1).trimStart() : raw
 			// Concatenated worktree syntax: `<repo>:<worktree>` at column 0 is exactly a bare
 			// `<worktree>` line indented under a `<repo>` header — the same worktree session, without
 			// having to nest. Split on the first `:` (unless the whole header is itself a known alias,
@@ -579,6 +587,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 						indent: '',
 						showNow,
 						showNowFired: false,
+						sleep,
 						widgets: [],
 						heralds: [],
 					}
@@ -603,6 +612,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				indent: '',
 				showNow,
 				showNowFired: false,
+				sleep,
 				widgets: [],
 				heralds: [],
 			}
@@ -875,7 +885,13 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 			// once it has queued work below it; an empty one is just an inert note. A leading `!`
 			// means "show this worktree now", like on a repo header; it's stripped once acted on.
 			const showNow = leadingBang
-			const name = t
+			// A leading `?` sleeps this worktree (tmux torn down, conversations kept); stripped from
+			// the name for label/dir resolution but left in the file as the user's toggle. Sleep also
+			// cascades from the enclosing container (`target`) — a `?repo` sleeps the worktrees nested
+			// under *this* occurrence — but because that's the specific parsed parent object, a second
+			// unprefixed block for the same repo doesn't drag its own worktrees to sleep.
+			const sleep = t.startsWith('?')
+			const name = sleep ? t.slice(1).trimStart() : t
 			// The tmux label prefixes the container's label onto the worktree name (`app-4-feat`),
 			// so the worktree's session sorts next to its repo's `__app-4` in `tmux ls` and two
 			// same-named worktrees under different repos never collide. `-` keeps it safe as both
@@ -896,6 +912,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				indent: line.slice(0, line.length - line.trimStart().length),
 				showNow,
 				showNowFired: false,
+				sleep: sleep || !!target.sleep,
 				widgets: [],
 				heralds: [],
 			}
@@ -2472,11 +2489,18 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 			// Settles to [DONE] once the background work clears (the Stop branch below).
 			active.desiredKind = 'WAITING'
 		} else if (isTurnEnd(io.state, rt.sentAt)) {
-			if (io.needsAttention) {
+			if (io.needsAttention || (active.desiredKind === 'ATTENTION' && isIdleNudge(io.state))) {
 				// The turn ended cleanly, but Jev judged its final message as leaving the human
 				// something to do (a question / follow-ups awaiting a go-ahead / a blocked ending).
 				// Flag it and hold the lane — like a blocking Notification — rather than draining on;
 				// answering in the pane (UserPromptSubmit, below) clears it back to [EXECUTING].
+				//
+				// The idle-nudge guard: Jev's verdict is latched on the turn's Stop mtime, but the
+				// idle_prompt nudge fires ~60s later with a newer mtime, so by then the caller's
+				// `needsAttention` has gone false (the latch no longer matches). Without this, that
+				// nudge would silently downgrade an already-flagged [NEEDS ATTENTION] to [DONE]. The
+				// nudge is a mere turn-end fallback carrying no verdict, so it must hold the flag —
+				// only a fresh Stop (re-judged) or a human answer (UserPromptSubmit) may clear it.
 				active.desiredKind = 'ATTENTION'
 			} else {
 				active.desiredKind = 'DONE'
@@ -2688,10 +2712,24 @@ async function tick(rt: Rt) {
 			}
 		}
 
+	// A session that stays in the control file (and is live) is a safe place to park a client
+	// before we kill the session it's watching (sleep teardown and reaping both use it).
+	const survivor = [...live].find((label) => modelLabels.has(label) || RESERVED.has(label)) ?? null
 	for (const s of sessions) {
 		const label = s.label
 		if (RESERVED.has(label)) continue
 		const dir = s.dir
+		if (s.sleep) {
+			// `?`-prefixed scope (sleep): keep it torn down but preserve its tracked conversation
+			// ids, so removing the `?` later wakes it and --resumes. Kill the live tmux session once
+			// and drop its state files, but keep rt[label] (its `conv` map) and never respawn while
+			// asleep. A worktree's dir is left on disk, so a wake reopens it in place.
+			if (live.has(label)) {
+				actions.push(() => doKill(label, survivor))
+				rmAllDoneFiles(label)
+			}
+			continue
+		}
 		if (!existsSync(dir)) {
 			// A worktree session's dir doesn't exist until we create it — and only once it has
 			// work (like any spawn). A git base is worktree'd; a non-git base is symlinked so the
@@ -2861,9 +2899,6 @@ async function tick(rt: Rt) {
 		}
 	}
 
-	// A session that stays in the control file (and is live) is a safe place to
-	// park a client before we kill the session it's watching.
-	const survivor = [...live].find((label) => modelLabels.has(label) || RESERVED.has(label)) ?? null
 	for (const { label, worktree } of reapTargets(live, modelLabels, RESERVED, rt)) {
 		actions.push(() => doKill(label, survivor))
 		// If this was a worktree, remove it from disk too (after the kill frees its cwd), so

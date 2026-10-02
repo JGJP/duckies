@@ -161,6 +161,18 @@ moonbase-2
   regardless of the queue — then strips the `!` (a one-shot request). The name/path
   resolves from the header without the `!`. This is the eager cousin of a queued
   `show` line (below).
+
+  A leading `?` on the header (e.g. `?moonbase`) means **sleep**: the supervisor
+  tears down that session's tmux session but **keeps its tracked conversation ids**,
+  and won't respawn it while the `?` is there. Remove the `?` and it comes back,
+  `--resume`-ing the same conversation(s) (see [Conversation resume](#notes)). Unlike
+  `!`, the `?` is a **persistent toggle** — herald leaves it in the file for you to
+  flip. Sleep **cascades** to the worktrees nested under that header, so `?moonbase`
+  parks the repo and all its worktrees at once — but only the ones under *that*
+  occurrence: if the same repo appears in another block without a `?`, that block's
+  worktrees stay awake. A `?` on a worktree label alone sleeps just that worktree. A
+  slept worktree's tree is left on disk so a wake reopens it in place. Use it to park
+  sessions you don't want running right now without losing their context or queued work.
 - `prompt: …` lines (`: …` is shorthand) and `$command` lines under a session form
   **one queue** that drains **bottom-to-top**, **one item at a time in file order**
   (oldest at the bottom; append new work at the top). An item runs only once the

@@ -508,6 +508,28 @@ const jevAttn = (() => {
 })()
 check('needsAttention latches [NEEDS ATTENTION] and holds the lane; answering clears it', jevAttn.flagged && jevAttn.cleared, JSON.stringify(jevAttn))
 
+// A Jev-flagged turn whose Stop is then overwritten by the idle_prompt nudge must STAY flagged.
+// The verdict is latched on the Stop's mtime, so by the nudge tick the caller's `needsAttention`
+// has gone false — and the idle nudge is itself a turn-end signal. Without the guard that nudge
+// silently downgrades [NEEDS ATTENTION] back to [DONE]. Regression for app-reviews:card-onboarding.
+const jevAttnIdleNudge = (() => {
+	let content = 'alpha\n\t: newer task\n\t: fix the bug\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 2 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch bottom item
+	step({ now: 200, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false, needsAttention: true }) // Jev flags
+	const flagged = content.includes('[NEEDS ATTENTION]')
+	// ~60s later the idle nudge overwrites the Stop; verdict no longer matches, so needsAttention is false.
+	step({ now: 260, state: { event: 'Notification', notify: 'idle_prompt', mtimeMs: 260 }, cmdDoneMtime: null, paneBusy: false, needsAttention: false })
+	const held = content.includes('[NEEDS ATTENTION]') && !content.includes('[DONE]')
+	return { flagged, held, content }
+})()
+check('idle_prompt nudge does not downgrade an already-flagged [NEEDS ATTENTION]', jevAttnIdleNudge.flagged && jevAttnIdleNudge.held, JSON.stringify(jevAttnIdleNudge))
+
 const jevNoAttn = (() => {
 	let content = 'alpha\n\t: fix the bug\n'
 	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
@@ -634,6 +656,50 @@ check(
 		cont.sessions.some((s) => s.label === 'app-feat' && s.worktreeBase) &&
 		applyOps(cont.lines, buildOps(cont.sessions)).join('\n') === 'app\n\t: fix this:\n\t| TypeError\n\t|   at foo (a.ts:10)\n\tfeat\n\t\t: work\n',
 	JSON.stringify({ text: cont.sessions[0].prompts[0].text, labels: cont.sessions.map((s) => s.label) }),
+)
+
+// Sleep (`?` prefix): a `?` on a repo header or worktree label marks the scope asleep (tick tears
+// its tmux down but keeps the conversation ids). It's stripped for label/dir resolution, but left
+// in the file verbatim — a persistent, user-toggled flag — so the whole thing round-trips.
+const sleepHdr = parse('?app\n\t: do x\n')
+check(
+	'`?` on a header sets sleep + resolves the clean label, round-trips verbatim',
+	sleepHdr.sessions[0].sleep === true &&
+		sleepHdr.sessions[0].label === 'app' &&
+		sleepHdr.sessions[0].prompts[0].text === 'do x' &&
+		applyOps(sleepHdr.lines, buildOps(sleepHdr.sessions)).join('\n') === '?app\n\t: do x\n',
+	JSON.stringify({ sleep: sleepHdr.sessions[0].sleep, label: sleepHdr.sessions[0].label }),
+)
+// A `?` on a worktree label sleeps just that worktree; its `app-feat` identity is unchanged.
+const sleepWt = parse('app\n\t: keep awake\n\t?feat\n\t\t: wt work\n')
+check(
+	'`?` on a worktree label sleeps only the worktree, keeps its label + round-trips',
+	sleepWt.sessions.find((s) => s.label === 'app')?.sleep !== true &&
+		sleepWt.sessions.find((s) => s.label === 'app-feat')?.sleep === true &&
+		sleepWt.sessions.find((s) => s.label === 'app-feat')?.worktreeBase !== undefined &&
+		applyOps(sleepWt.lines, buildOps(sleepWt.sessions)).join('\n') === 'app\n\t: keep awake\n\t?feat\n\t\t: wt work\n',
+	JSON.stringify(sleepWt.sessions.map((s) => [s.label, s.sleep])),
+)
+// A `?` is a header/worktree-only sigil: a prompt whose text starts with `?` is an ordinary
+// question prompt, never a sleep toggle, and the session stays awake.
+const qPrompt = parse('app\n\t: ?is this fine\n')
+check(
+	'a prompt starting with `?` is text, not a sleep toggle',
+	qPrompt.sessions[0].sleep !== true && qPrompt.sessions[0].prompts[0].text === '?is this fine',
+)
+// Sleep cascades from a `?` header down to the worktrees nested under it (no `?` of their own).
+const cascade = parse('?app\n\t: x\n\tfeat\n\t\t: y\n')
+check(
+	'`?` on a header cascades sleep to its nested worktrees',
+	cascade.sessions.find((s) => s.label === 'app')?.sleep === true && cascade.sessions.find((s) => s.label === 'app-feat')?.sleep === true,
+)
+// Cascade is scoped to the file occurrence: with two blocks for the same repo, a `?` on one only
+// sleeps the worktrees nested under *that* block — the other block's worktrees stay awake.
+const twoBlocks = parse('?app\n\tfeat1\n\t\t: a\napp\n\tfeat2\n\t\t: b\n')
+check(
+	'sleep cascades only to the `?` block’s worktrees, not another block’s for the same repo',
+	twoBlocks.sessions.find((s) => s.label === 'app-feat1')?.sleep === true && twoBlocks.sessions.find((s) => s.label === 'app-feat2')?.sleep !== true,
+	JSON.stringify(twoBlocks.sessions.map((s) => [s.label, s.sleep])),
 )
 
 // macroSteps: a macro body expands to runnable steps in RUN order (bottom-to-top, like every
