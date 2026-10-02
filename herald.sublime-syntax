@@ -34,6 +34,14 @@ contexts:
       captures:
         1: entity.name.function.macro.herald
 
+    # HERALD directive: a `HERALD: <text>` line runs a background agent to edit the `.herald` files
+    # themselves (see the herald pass in herald.ts). Case-sensitive `HERALD:` so ordinary prose never
+    # trips it. Matched before the worktree fallback so it isn't read as a label; a distinct color
+    # marks it as a meta-command. The whole line reads as one unit.
+    - match: '^[ \t]*(HERALD:.*)$'
+      captures:
+        1: markup.other.directive.herald
+
     # Widget call: a `&name [args]` line — a status display, mirroring its output below as `| `
     # lines (see herald-widgets.yaml). A single `&` runs once; `&&` reruns on the widget's interval.
     # The `&name` line and the `| ` output lines directly under it form one block, painted

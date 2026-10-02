@@ -268,6 +268,7 @@ const C = {
 	cmdText: fg(51, 153, 255),
 	show: '\x1b[38;5;170m', // keyword-ish accent — no scheme rule to match
 	macro: fg(166, 223, 149), // #a6df95, no background (entity.name.function.macro)
+	directive: fgbg(255, 255, 255, 139, 92, 246), // white on #8b5cf6 (markup.other.directive) — a `HERALD:` line
 	widget: fgbg(255, 255, 255, 51, 51, 51), // white on #333333 — a `&name` display and its `| ` output
 	exec: fgbg(0, 0, 0, 255, 121, 26), // black on #ff791a (constant.language.executing)
 	done: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (markup.inserted.done)
@@ -337,6 +338,11 @@ function colorsFor(line: string, row: number): (string | null)[] {
 	if (/^@[\w-]+(?:\s.*)?$/.test(body)) {
 		// Macro call — a name char must follow the `@` (so a `@@@…` body line stays default).
 		fill(lead, n, C.macro)
+	} else if (body.startsWith('HERALD:')) {
+		// A `HERALD:` directive — a background agent that edits the `.herald` files themselves.
+		// Case-sensitive (like parse), matched before the worktree fallback so it isn't read as a
+		// label; painted white-on-violet as a distinct meta-command.
+		fill(lead, n, C.directive)
 	} else if (/^&+[\w-]+(?:[\s:].*)?$/.test(body)) {
 		// Widget call — a `&name` (once) or `&&name` (live) display, styled like a macro but its own
 		// hue. Matches the inline-output form too (`&name: …`), so the whole line reads as one unit.

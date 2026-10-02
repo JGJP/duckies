@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
+import { aliasWorktree, applyOps, buildHeraldOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 
 let failures = 0
@@ -272,6 +272,15 @@ planQueue(strandedPending.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCoun
 check('a stranded `%` fires over never-run commands below it', strandedPending.sessions[0].prompts.find((p) => p.isClear)!.fired === true)
 const strandedPendingOut = applyOps(strandedPending.lines, buildOps(strandedPending.sessions)).join('\n')
 check('the stranded `%` sweeps the dead commands below it, keeps the frontier', !strandedPendingOut.includes('never runs') && !/^\t%$/m.test(strandedPendingOut) && strandedPendingOut.includes(': top'))
+// A `%` stranded below a *live* [EXECUTING] item (not a finished [DONE]): the drain has already
+// climbed past the `%` to reach the running item above it, so the finished run + never-run `$`
+// lines below are dead cruft. The stranded check must see the EXECUTING marker as the frontier
+// (frontierIdx counts only DONE/ERROR), else the pending `$` keeps it blocked forever.
+const strandedBelowExec = parse('alpha\n\t: running top\n\t\t[EXECUTING]\n\t%\n\t: doneB\n\t\t[DONE]\n\t$ never runs\n')
+planQueue(strandedBelowExec.sessions[0], { sentAt: 0, cmdSentAt: 0, prevPromptCount: 2, macroStep: 0 }, { now: 100, state: null, cmdDoneMtime: null })
+check('a `%` below a live [EXECUTING] item fires over the cruft beneath it', strandedBelowExec.sessions[0].prompts.find((p) => p.isClear)!.fired === true)
+const strandedBelowExecOut = applyOps(strandedBelowExec.lines, buildOps(strandedBelowExec.sessions)).join('\n')
+check('the `%` below [EXECUTING] sweeps the run + dead command below it, keeps the executing frontier', !strandedBelowExecOut.includes('doneB') && !strandedBelowExecOut.includes('never runs') && !/^\t%$/m.test(strandedBelowExecOut) && strandedBelowExecOut.includes(': running top'))
 
 // 5c. `$` command lines parse as one-shot commands (isCmd) separate from prompts.
 const cmds = 'alpha\n\tprompt: do a\n\t$git status\n\t$pnpm test\n'
@@ -468,6 +477,41 @@ const answered = (() => {
 	return { flagged, executing, content }
 })()
 check('answering [NEEDS ATTENTION] flips it back to [EXECUTING], then Stop -> [DONE]', answered.flagged && answered.executing && answered.content.includes('[DONE]'), JSON.stringify(answered))
+
+// Jev attention: a turn that ends with `needsAttention` set (the caller judged its final message as
+// "waiting on the human") latches [NEEDS ATTENTION] and holds the lane instead of draining to [DONE];
+// answering (UserPromptSubmit) clears it back to [EXECUTING]. Without the flag the same Stop is a
+// plain [DONE] — so the default path is unchanged.
+const jevAttn = (() => {
+	let content = 'alpha\n\t: newer task\n\t: fix the bug\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 2 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch bottom item
+	step({ now: 200, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false, needsAttention: true })
+	const flagged = content.includes('[NEEDS ATTENTION]') && !content.includes('[EXECUTING]') // held: newer task not dispatched
+	step({ now: 300, state: { event: 'UserPromptSubmit', mtimeMs: 300 }, cmdDoneMtime: null }) // answered
+	const cleared = content.includes('[EXECUTING]') && !content.includes('[NEEDS ATTENTION]')
+	return { flagged, cleared, content }
+})()
+check('needsAttention latches [NEEDS ATTENTION] and holds the lane; answering clears it', jevAttn.flagged && jevAttn.cleared, JSON.stringify(jevAttn))
+
+const jevNoAttn = (() => {
+	let content = 'alpha\n\t: fix the bug\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch
+	step({ now: 200, state: { event: 'Stop', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false, needsAttention: false })
+	return { content }
+})()
+check('a clean turn without needsAttention still latches [DONE]', jevNoAttn.content.includes('[DONE]') && !jevNoAttn.content.includes('[NEEDS ATTENTION]'), JSON.stringify(jevNoAttn))
 
 // Pane-busy veto: a Stop that arrives while the claude pane is still working (its "esc to
 // interrupt" hint is up) must NOT complete the prompt. A session that resumes on its own
@@ -702,6 +746,42 @@ check('a worktree task keeps its own marker (deeper indent) and round-trips', wt
 // prefix chains through nesting, while the dir leaf stays the bare on-disk name.
 const wtPrefix = parse('app-4\n\tfeat\n\t\tsub\n\t\t\t: deep\n').sessions.filter((s) => s.worktreeBase)
 check('a worktree label is prefixed with its repo, chaining through nesting', wtPrefix[0].label === 'app-4-feat' && wtPrefix[1].label === 'app-4-feat-sub' && wtPrefix[0].dir.endsWith('/app-4-worktrees/feat') && wtPrefix[1].dir.endsWith('/feat-worktrees/sub'), JSON.stringify(wtPrefix.map((s) => [s.label, s.dir])))
+
+// Concatenated worktree syntax: `<repo>:<name>` at column 0 is the same worktree session as a
+// bare `<name>` nested under a `<repo>` header — same label, dir and base — but without indenting.
+const wtColon = (() => {
+	const nested = parse('superapp\n\tfeat-x\n\t\t: work in x\n\t\t$ npm test\n')
+	const flat = parse('superapp:feat-x\n\t: work in x\n\t$ npm test\n')
+	return { n: nested.sessions.find((s) => s.worktreeBase), f: flat.sessions.find((s) => s.worktreeBase) }
+})()
+check(
+	'`<repo>:<name>` at column 0 becomes the same worktree session as the nested form',
+	wtColon.f?.label === 'superapp-feat-x' &&
+		wtColon.f.label === wtColon.n?.label &&
+		wtColon.f.dir === wtColon.n?.dir &&
+		wtColon.f.dir.endsWith('/superapp-worktrees/feat-x') &&
+		wtColon.f.worktreeBase === wtColon.n?.worktreeBase &&
+		wtColon.f.prompts.length === 2 &&
+		wtColon.f.prompts[0].text === 'work in x' &&
+		wtColon.f.prompts[1].isCmd === true,
+	JSON.stringify({ label: wtColon.f?.label, dir: wtColon.f?.dir, base: wtColon.f?.worktreeBase, prompts: wtColon.f?.prompts.map((p) => p.text) }),
+)
+// The concatenated worktree inherits its base repo's worktree setup from an object-form alias,
+// exactly like the nested form (resolved off the `<repo>` part, not the whole header).
+const wtColonAlias = parse('app:feat\n\t: go\n', { app: { dir: '/opt/superapp', 'worktree/cmd': ['pnpm install'], 'worktree/copy': ['.env'] } }).sessions.find((s) => s.worktreeBase)!
+check('a concatenated worktree inherits its base repo worktree setup', wtColonAlias.dir === '/opt/superapp-worktrees/feat' && JSON.stringify(wtColonAlias.worktreeCmd) === JSON.stringify(['pnpm install']) && JSON.stringify(wtColonAlias.worktreeCopy) === JSON.stringify(['.env']))
+// A `!` on the concatenated header shows it now and round-trips (the `!` strips, colon stays).
+const wtColonBang = (() => {
+	const content = '!app:feat\n\t: do it\n'
+	const { lines, sessions } = parse(content)
+	const s = sessions.find((x) => x.worktreeBase)!
+	s.showNowFired = true
+	return { showNow: s.showNow, roundTrip: applyOps(lines, buildOps(sessions)).join('\n') }
+})()
+check('a `!` on a `<repo>:<name>` header shows now and strips back to the bare colon form', wtColonBang.showNow === true && wtColonBang.roundTrip === 'app:feat\n\t: do it\n', JSON.stringify(wtColonBang))
+// A colon in a known alias key still wins — the whole header resolves as that alias, not a split.
+const wtColonAliasKey = parse('we:b\n\t: go\n', { 'we:b': '/opt/web' }).sessions[0]
+check('a colon inside a known alias key is not split into a worktree', wtColonAliasKey.label === 'we:b' && wtColonAliasKey.dir === '/opt/web' && wtColonAliasKey.worktreeBase === undefined, JSON.stringify({ label: wtColonAliasKey.label, dir: wtColonAliasKey.dir, base: wtColonAliasKey.worktreeBase }))
 
 // An object-form alias carries per-repo worktree setup (`worktree/cmd`, `worktree/copy`). The
 // repo header resolves its `dir` like a string alias and holds the setup; a worktree child
@@ -1328,6 +1408,108 @@ check(
 		'  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)',
 	].join('\n')
 	check('conversation text quoting `· N shells` does NOT report background (live footer is clean)', !paneBackgroundRunning(metaPane))
+}
+
+// A `HERALD: <directive>` line is collected on the session as a `heralds` item — not a prompt,
+// not a widget — with the directive text stripped of the `HERALD:` sigil and trimmed.
+{
+	const h = parse('moonbase\n\tHERALD: remove every idle lane here\n')
+	const s = h.sessions[0]
+	check('a HERALD: line parses into s.heralds, not prompts/widgets', s.heralds.length === 1 && s.prompts.length === 0 && s.widgets.length === 0, JSON.stringify(s.heralds))
+	check('the HERALD directive is the text after the sigil, trimmed', s.heralds[0].directive === 'remove every idle lane here')
+	check('a HERALD directive carries its session label + dir for context', s.heralds[0].label === 'moonbase' && s.heralds[0].dir.endsWith('/moonbase'))
+	// It never enters the queue, so a HERALD-only session has no pending input and won't spawn.
+	check('a HERALD-only session has no pending input (never spawns a pane)', hasPendingInput(s) === false)
+
+	// `HERALD:` is case-sensitive — lowercase `herald:` is not a directive (it falls through to the
+	// worktree/non-sigil case, like any other prose), so it never accidentally triggers an agent.
+	const lower = parse('moonbase\n\therald: not a directive\n')
+	check('lowercase `herald:` is not a HERALD directive', lower.sessions[0].heralds.length === 0)
+
+	// A `-> ` note directly below the directive attaches to it (its done-marker), not to a prompt.
+	const done = parse('moonbase\n\t: real prompt\n\t\t[DONE]\n\tHERALD: tidy up here\n\t\t-> removed 2 idle lanes\n')
+	const ds = done.sessions[0]
+	check('a `-> ` note below a HERALD line attaches to the directive as its done-marker', ds.heralds[0].note?.text === 'removed 2 idle lanes')
+	check('the prompt above keeps its own note, not the herald one', ds.prompts.find((p) => p.text === 'real prompt')?.note == null)
+
+	// buildOps mirrors a finished directive's summary just below its line (once), and a re-parse of
+	// that output round-trips — the note is now present, so buildOps re-adds nothing.
+	const fresh = parse('moonbase\n\tHERALD: tidy up here\n')
+	fresh.sessions[0].heralds[0].desiredNote = 'removed 2 idle lanes'
+	const written = applyOps(fresh.lines, buildOps(fresh.sessions)).join('\n')
+	check('buildOps writes the `-> ` summary below the HERALD line', written === 'moonbase\n\tHERALD: tidy up here\n\t\t-> removed 2 idle lanes\n', JSON.stringify(written))
+	const round = parse(written)
+	check('a HERALD line that already has a `-> ` note re-adds nothing', applyOps(round.lines, buildOps(round.sessions)).join('\n') === written)
+
+	// A HERALD directive under a worktree carries that worktree's label + dir, not the repo's.
+	const wt = parse('superapp\n\t: main task\n\tfeature-x\n\t\tHERALD: move this worktree to its own file\n')
+	const wtHerald = wt.sessions.find((x) => x.label === 'superapp-feature-x')?.heralds[0]
+	check('a HERALD under a worktree carries the worktree label + dir', wtHerald?.label === 'superapp-feature-x' && wtHerald?.dir.endsWith('/superapp-worktrees/feature-x'), JSON.stringify(wtHerald))
+
+	// A leading `!` (`!HERALD:`) is a reveal request: the directive parses clean (no `!` in the text),
+	// with showNow set and a stripped-line ready. Once the reveal fires (showNowFired), buildOps
+	// rewrites the line without the `!`.
+	const bang = parse('moonbase\n\t!HERALD: tidy up here\n')
+	const bh = bang.sessions[0].heralds[0]
+	check('a `!HERALD:` parses clean with showNow set', bh.directive === 'tidy up here' && bh.showNow === true && bh.strippedLine === '\tHERALD: tidy up here', JSON.stringify(bh))
+	bh.showNowFired = true
+	check('a fired `!HERALD:` reveal is consumed (the `!` is stripped)', applyOps(bang.lines, buildOps(bang.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n', JSON.stringify(applyOps(bang.lines, buildOps(bang.sessions))))
+
+	// A column-0 `HERALD:` directive can sit anywhere, not under a session/worktree. It parses into
+	// the top-level `heralds` list (not as a session header, and never mistaken for a `repo:worktree`
+	// split on the `:` in `HERALD:`), carrying an empty label/dir (resolved to the file basename later).
+	const top = parse('HERALD: tidy the whole file\napp\n\t: a task\n')
+	check('a column-0 HERALD parses into top-level heralds, not a session', top.heralds.length === 1 && top.heralds[0].directive === 'tidy the whole file' && top.sessions.length === 1 && top.sessions[0].label === 'app', JSON.stringify({ heralds: top.heralds, labels: top.sessions.map((s) => s.label) }))
+	check('a top-level HERALD has empty label/dir (resolved later) and indent ""', top.heralds[0].label === '' && top.heralds[0].dir === '' && top.heralds[0].indent === '')
+
+	// A `-> ` note indented below a top-level directive attaches to it as its done-marker (nothing
+	// else outside a session is captured), and buildHeraldOps round-trips it (re-adds nothing).
+	const topDone = parse('HERALD: tidy the whole file\n\t-> tidied 3 blocks\napp\n\t: a task\n')
+	check('a `-> ` note below a top-level HERALD attaches to it', topDone.heralds[0].note?.text === 'tidied 3 blocks')
+	check('a done top-level HERALD re-adds nothing', buildHeraldOps(topDone.heralds).length === 0)
+
+	// buildHeraldOps writes a finished top-level directive's summary just below its line (one tab in).
+	const topFresh = parse('HERALD: tidy the whole file\napp\n\t: a task\n')
+	topFresh.heralds[0].desiredNote = 'tidied 3 blocks'
+	check('buildHeraldOps writes a top-level `-> ` note at one tab', applyOps(topFresh.lines, buildHeraldOps(topFresh.heralds)).join('\n') === 'HERALD: tidy the whole file\n\t-> tidied 3 blocks\napp\n\t: a task\n', JSON.stringify(applyOps(topFresh.lines, buildHeraldOps(topFresh.heralds))))
+
+	// A `!` on a column-0 directive: showNow set, stripped line has no leading tab (column 0).
+	const topBang = parse('!HERALD: tidy the whole file\n')
+	check('a column-0 `!HERALD:` sets showNow with a tab-less stripped line', topBang.heralds[0].showNow === true && topBang.heralds[0].strippedLine === 'HERALD: tidy the whole file', JSON.stringify(topBang.heralds[0]))
+
+	// While its background agent runs, a directive gets an `[EXECUTING]` marker just below it —
+	// buildHeraldOps inserts it when desiredKind is EXECUTING and no marker is present yet.
+	const exec = parse('moonbase\n\tHERALD: tidy up here\n')
+	exec.sessions[0].heralds[0].desiredKind = 'EXECUTING'
+	check('buildHeraldOps writes `[EXECUTING]` below a running HERALD line', applyOps(exec.lines, buildOps(exec.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n', JSON.stringify(applyOps(exec.lines, buildOps(exec.sessions))))
+
+	// An `[EXECUTING]` line below a directive parses as the directive's marker (not a prompt's,
+	// not a session marker), and re-adds nothing while it stays EXECUTING.
+	const execRound = parse('moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
+	const eh = execRound.sessions[0].heralds[0]
+	check('an `[EXECUTING]` below a HERALD line parses as the directive marker', eh.marker?.kind === 'EXECUTING' && execRound.sessions[0].prompts.length === 0 && execRound.sessions[0].desiredSession == null, JSON.stringify({ marker: eh.marker, prompts: execRound.sessions[0].prompts.length, sess: execRound.sessions[0].desiredSession }))
+	eh.desiredKind = 'EXECUTING'
+	check('a still-running HERALD `[EXECUTING]` re-adds nothing', applyOps(execRound.lines, buildOps(execRound.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
+
+	// When the agent finishes, the marker is dropped and the `-> ` note takes its place (no `[DONE]`).
+	const execDone = parse('moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
+	execDone.sessions[0].heralds[0].desiredKind = null
+	execDone.sessions[0].heralds[0].desiredNote = 'removed 2 idle lanes'
+	check('a finished HERALD drops `[EXECUTING]` and writes its `-> ` note in its place', applyOps(execDone.lines, buildOps(execDone.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n\t\t-> removed 2 idle lanes\n', JSON.stringify(applyOps(execDone.lines, buildOps(execDone.sessions))))
+
+	// The nearest-item rule: an `[EXECUTING]` between a marked prompt and a directive belongs to the
+	// directive (nearer), leaving the prompt's own earlier marker alone.
+	const nearest = parse('moonbase\n\t: real prompt\n\t\t[DONE]\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
+	const ns = nearest.sessions[0]
+	check('an `[EXECUTING]` nearer a HERALD than a prompt binds to the directive', ns.heralds[0].marker?.kind === 'EXECUTING' && ns.prompts.find((p) => p.text === 'real prompt')?.marker?.kind === 'DONE', JSON.stringify({ herald: ns.heralds[0].marker, prompt: ns.prompts.find((p) => p.text === 'real prompt')?.marker }))
+
+	// Top-level (column-0) directives carry the marker the same way: parse it from an indented
+	// `[EXECUTING]` below the line, and buildHeraldOps inserts/drops it at one tab in.
+	const topExec = parse('HERALD: tidy the whole file\napp\n\t: a task\n')
+	topExec.heralds[0].desiredKind = 'EXECUTING'
+	check('buildHeraldOps writes a top-level `[EXECUTING]` at one tab', applyOps(topExec.lines, buildHeraldOps(topExec.heralds)).join('\n') === 'HERALD: tidy the whole file\n\t[EXECUTING]\napp\n\t: a task\n', JSON.stringify(applyOps(topExec.lines, buildHeraldOps(topExec.heralds))))
+	const topExecRound = parse('HERALD: tidy the whole file\n\t[EXECUTING]\napp\n\t: a task\n')
+	check('an `[EXECUTING]` below a top-level HERALD parses as its marker', topExecRound.heralds[0].marker?.kind === 'EXECUTING', JSON.stringify(topExecRound.heralds[0].marker))
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)

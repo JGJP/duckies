@@ -81,6 +81,16 @@ myrepo
 - **Worktree**: an indented line that *isn't* a sigil names a git worktree of the session's
   repo; items nested under it run there. If the base isn't a git repo, it's symlinked instead
   (runs on the original files). A worktree line with no children is inert.
+- **Worktree, concatenated**: a column-0 header `<repo>:<worktree>` is the same worktree
+  session without the extra indent — items go one level under it instead of two. These are
+  identical:
+  ```
+  myrepo               myrepo:feat
+  	feat        ≡  	: work in the worktree
+  		: work in the worktree
+  ```
+  The `<repo>` part resolves like any header (alias / path / bare name); a leading `!` and the
+  worktree's `worktree/cmd`+`worktree/copy` setup work the same as the nested form.
 - **`show`**: a bare `show` queue item brings the session on screen when the drain reaches it.
 
 ## Holding work back (`#`)

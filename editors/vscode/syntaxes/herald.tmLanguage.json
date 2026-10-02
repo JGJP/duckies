@@ -24,6 +24,13 @@
 			}
 		},
 		{
+			"comment": "HERALD directive: a `HERALD: <text>` line (any indent, incl. column 0) runs a background agent to edit the .herald files themselves. Case-sensitive so ordinary prose never trips it; matched before the session-header/worktree fallback so it isn't read as a label.",
+			"match": "^[ \\t]*(HERALD:.*)$",
+			"captures": {
+				"1": { "name": "markup.other.directive.herald" }
+			}
+		},
+		{
 			"comment": "Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines. The `&name` line and the `| ` output lines directly under it form one block (painted white-on-dark-grey); the block ends at the first line that is not a `| ` continuation, so a prompt body `|` stays untouched.",
 			"begin": "(?=^[ \\t]*&+[\\w-]+(?:[ \\t:].*)?$)",
 			"end": "^(?!\\t+[ ]*\\|)",

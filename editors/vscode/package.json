@@ -49,6 +49,10 @@
 					{
 						"scope": "entity.name.function.widget.herald, markup.other.widget.output.herald",
 						"settings": { "foreground": "#FFFFFF", "background": "#333333" }
+					},
+					{
+						"scope": "markup.other.directive.herald",
+						"settings": { "foreground": "#FFFFFF", "background": "#8B5CF6" }
 					}
 				]
 			}

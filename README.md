@@ -150,6 +150,12 @@ moonbase-2
     `__moonbase`). Use this to point sessions anywhere on disk; or
   - a **bare name** → dir `~/_dev/<name>`, tmux session `__<name>`.
 
+  A header may also carry a `:<worktree>` suffix (`<repo>:<feature>`) — the
+  concatenated [worktree](#the-herald-files) form, equivalent to nesting a bare
+  `<feature>` line under the `<repo>` header but without the extra indent. The part
+  before the `:` resolves by the three rules above; a colon inside a known alias key
+  is left intact rather than split.
+
   A leading `!` on the header (e.g. `!moonbase`) means **show it now**: the
   supervisor switches your attached tmux client to the session immediately —
   regardless of the queue — then strips the `!` (a one-shot request). The name/path
@@ -163,8 +169,10 @@ moonbase-2
 - `prompt:` lines run in the **claude pane**; the supervisor marks one `[EXECUTING]`
   and advances it to `[DONE]` when Claude signals it finished (the hook's Stop
   event). `[NEEDS ATTENTION]` replaces the marker when Claude blocks waiting for
-  input mid-task; answering it (submitting a prompt into the pane) flips it back to
-  `[EXECUTING]`. `[WAITING]` marks a turn that has ended but left **backgrounded
+  input mid-task — or, with `TYPESAFE_API_KEY` set, when a turn *ends* but its final
+  message reads as waiting on you (a question or follow-ups pending a go-ahead; see
+  [Env overrides](#env-overrides)); answering it (submitting a prompt into the pane)
+  flips it back to `[EXECUTING]`. `[WAITING]` marks a turn that has ended but left **backgrounded
   tasks running** (e.g. a `/watch-pr-comments` loop polling CI): the pane's `· N
   shells` indicator tells herald a `<task-notification>` will resume Claude on its
   own (no hook fires), so the item is held — not latched `[DONE]`, and the next
@@ -246,6 +254,18 @@ moonbase-2
   	feature-y                       ← a second, independent worktree + Claude (__superapp-feature-y)
   		: try a different approach
   ```
+  - **Concatenated form.** A column-0 header `<repo>:<worktree>` is the *same* worktree
+    session as the nested form above, just without the extra indent — its items sit one level
+    under it instead of two. The `<repo>` part resolves like any header (alias / path / bare
+    name) and supplies the worktree's base; the leading `!`, the `__<repo>-<name>` tmux
+    identity, and the base repo's `worktree/copy`/`worktree/cmd` setup all behave identically.
+    These two are equivalent:
+
+    ```
+    superapp                          superapp:feature-x
+    	feature-x               ≡     	: try the risky refactor here
+    		: try the risky refactor here
+    ```
 - `#…` lines are **comments**, and an **indented** one is also a **barrier**: the drain
   halts when it reaches it until you delete the line — put one below the
   work you want to stop (the bottom-most item runs first, so a `#` at the very bottom
@@ -270,6 +290,9 @@ moonbase-2
   If clearing empties a **live** label entirely, the label itself is then removed (a worktree
   cascades up to remove its now-empty repo), so a `%` at the top of a worktree cleans the whole
   thing away when its work is done. Idle or never-spawned empty headers are left in place.
+- A **`HERALD: …`** line asks a background Claude to **edit the `.herald` files themselves** (e.g.
+  `HERALD: remove every idle lane here`) — it's a one-shot meta-command, not a queue item. See
+  [HERALD directives](#herald-directives) below.
 - Only the **current** item **per lane** keeps a marker — it is that lane's *frontier*:
   items above it (nearer the top) are still pending, items below it have already run.
   When the next item is marked `[EXECUTING]`, the previous marker is stripped, so each
@@ -667,6 +690,73 @@ kick a stale one-shot without deleting and re-adding it.
 **Arguments** work exactly like macros: `&pr 2500` (or `&&pr 2500`) fills `{0}`/`{*}` in the commands. The
 widgets file is per-machine (gitignored), like `herald-aliases.yaml` / `herald-macros.yaml`.
 
+## HERALD directives
+
+A line starting with **`HERALD:`** asks a **background Claude to edit the `.herald` files
+themselves** — a self-referential meta-command for tidying and reshaping the control files without
+leaving your editor. It's the one line whose "work" is the dashboard, not a repo.
+
+```
+moonbase
+	: some pending task
+		[EXECUTING]
+	feature-x
+		: risky refactor
+			[DONE]
+	HERALD: remove every idle lane here
+```
+
+When herald sees a new `HERALD:` line it spawns a **visible tmux window** running `claude`, told
+**where the line is** — the file and line number and the session block it sits under — so words like
+*here*, *this*, or *this worktree* resolve. The window lives in a dedicated **`__herald-agent`**
+tmux session (one window per running directive); the agent's cwd is a dedicated **agent directory**
+whose `CLAUDE.md` explains the `.herald` format and the task contract, with the control dir added so
+it can edit the files. It does the edit, then herald mirrors its `-> ` summary just below the
+directive — exactly like a finished prompt — and tears the window down:
+
+```
+	HERALD: remove every idle lane here
+		-> removed 2 idle lanes
+```
+
+That `-> ` note is the **done-marker**: the directive runs **once** and isn't re-run while the note
+is there — **delete the note to run it again** (just like deleting a `[DONE]` re-runs a lane). Some
+things you might write:
+
+```
+HERALD: move this worktree to a new file this-worktree.herald
+HERALD: remove every idle lane here
+HERALD: remove low-importance commands and prompts here that are already processed
+```
+
+Prefix a **`!`** (`!HERALD: …`) to **switch to the agent's window** as soon as it's up, so you can
+watch it work — the eager cousin of a queued reveal. The `!` is consumed (stripped) once it fires.
+
+A directive can sit **anywhere** — indented under a session/worktree (so *here*/*this worktree*
+resolve to that block), or at **column 0** as a top-level, file-wide directive:
+
+```
+HERALD: sort the sessions and drop every finished block
+	-> sorted; dropped 4 done blocks
+
+app
+	: real work
+```
+
+A top-level directive's agent window and state are keyed by the **control file's name** (e.g.
+`app.herald` → `app`); its `-> ` note lands one tab in, just below the line.
+
+Notes:
+
+- It's **not a queue item**: it never joins a session's prompt/command queue or blocks a lane, and a
+  block that holds *only* a `HERALD:` line doesn't spawn that session — the agent runs in its own
+  `__herald-agent` window regardless.
+- `HERALD:` is **case-sensitive**, so ordinary prose (or a `herald:` in a prompt body) never trips it.
+- The agent runs with `--permission-mode bypassPermissions` by default (it can't stop to answer
+  approval prompts). It acts on your control files autonomously — keep directives scoped to
+  file-tidying, which is what its `CLAUDE.md` steers it toward. See the env overrides to change the
+  permission mode, model, agent dir, or timeout.
+
 ## Env overrides
 
 - `HERALD_DIR` — scan a different directory for `*.herald` files instead of the repo dir.
@@ -676,11 +766,25 @@ widgets file is per-machine (gitignored), like `herald-aliases.yaml` / `herald-m
 - `HERALD_WIDGETS` — read widgets from a different file instead of `./herald-widgets.yaml`.
 - `HERALD_DEV_DIR` — where a bare session name resolves (`<dir>/<name>`); default `~/_dev`.
 - `HERALD_AGENT_CMD` — the command launched in each claude pane; default `claude` (point it at
-  a wrapper or a different agent CLI).
+  a wrapper or a different agent CLI). Also used for the `HERALD:` agent window.
+- `HERALD_AGENT_DIR` — cwd (and `CLAUDE.md` location) for the `HERALD:` agent; default `./agent`.
+- `HERALD_AGENT_PERMISSION_MODE` — the `HERALD:` agent's `--permission-mode`; default
+  `bypassPermissions` (it can't stop to answer approval prompts).
+- `HERALD_AGENT_MODEL` — optional `--model` for the `HERALD:` agent; default: the CLI's own default.
+- `HERALD_AGENT_TIMEOUT_MS` — when a stuck `HERALD:` agent is given up on (default 900000 = 15m).
 - `HERALD_TERM_APP` — macOS only, opt-in: the terminal app to bring to the foreground on a
   `show`/`!` (e.g. `WezTerm`, `iTerm`, `Terminal`). Unset ⇒ no app foregrounding (the tmux
   client still switches). Ignored off macOS.
 - `HERALD_READY_MS` — boot grace before the first prompt is sent (default 6000).
+- `TYPESAFE_API_KEY` — enables the Jev attention check: when a Claude turn ends cleanly, its final
+  message is judged by [TypeSafe](https://typesafe.ai)'s Jev model, and if it reads as *waiting on
+  you* (a question, follow-ups pending a go-ahead, a blocked/needs-a-decision ending) the lane is
+  flagged `[NEEDS ATTENTION]` and held instead of draining to `[DONE]`. A missing key, an error, or
+  a timeout falls back to plain `[DONE]`, so an outage never stalls the queue.
+- `HERALD_JEV_ATTENTION` — set to `0` to disable the Jev attention check even when a key is present.
+- `HERALD_JEV_THRESHOLD` — yes-probability cutoff for the flag (default `0.6`; higher ⇒ fewer flags).
+- `HERALD_JEV_TIMEOUT_MS` — how long the Jev call may take before falling back to `[DONE]` (default 6000).
+- `HERALD_JEV_MODEL` — optionally pin a Jev model; default: the SDK's own default.
 - `HERALD_SUBLIME_DIR` — (setup only) override Sublime's `Packages/User` dir the syntax is
   copied into.
 

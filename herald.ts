@@ -54,10 +54,10 @@ const NOTE_PROMPT =
 const BASE_SYSTEM_PROMPT_FILE = process.env.HERALD_SYSTEM_PROMPT_FILE ?? join(homedir(), '.config', 'fish', 'claude-system-prompt')
 const SYSTEM_PROMPT_FILE = join(STATE, 'system-prompt')
 const AGENT_IS_CLAUDE = /(^|[\s/])claude(\s|$)/.test(AGENT_CMD)
-// Build the combined system-prompt file (base + note instruction) and return the launch line.
-// Non-claude agents (a custom HERALD_AGENT_CMD) launch as-is — the flag wouldn't exist.
-function launchCmd(): string {
-	if (!AGENT_IS_CLAUDE) return AGENT_CMD
+// (Re)build the combined system-prompt file (base + note instruction) and return its path.
+// Shared by the interactive launch line and the headless HERALD agent so both fold in the
+// user's base prompt and the `-> ` summary instruction.
+function buildSystemPromptFile(): string {
 	let base = ''
 	if (BASE_SYSTEM_PROMPT_FILE) {
 		try {
@@ -66,14 +66,48 @@ function launchCmd(): string {
 	}
 	mkdirSync(STATE, { recursive: true })
 	writeFileSync(SYSTEM_PROMPT_FILE, `${base}${NOTE_PROMPT}\n`)
-	return `${AGENT_CMD} --append-system-prompt-file '${SYSTEM_PROMPT_FILE}'`
+	return SYSTEM_PROMPT_FILE
 }
+// Build the combined system-prompt file (base + note instruction) and return the launch line.
+// Non-claude agents (a custom HERALD_AGENT_CMD) launch as-is — the flag wouldn't exist.
+function launchCmd(): string {
+	if (!AGENT_IS_CLAUDE) return AGENT_CMD
+	return `${AGENT_CMD} --append-system-prompt-file '${buildSystemPromptFile()}'`
+}
+// HERALD directives: a `HERALD: <prompt>` line in a control file asks a background claude — run in
+// the agent dir (its CLAUDE.md explains the `.herald` format), with the control dir added so it can
+// edit the files — to act on the `.herald` file(s) themselves (e.g. "remove every idle lane here").
+// Unlike a normal prompt it never joins the queue; it runs in its own visible tmux window inside a
+// dedicated `__herald-agent` session (revealable with `!HERALD:`). `HERALD_AGENT_DIR` overrides the
+// cwd/CLAUDE.md dir; `HERALD_AGENT_PERMISSION_MODE` the permission mode (default bypassPermissions —
+// the run can't answer prompts); `HERALD_AGENT_MODEL` an optional model; `HERALD_AGENT_TIMEOUT_MS`
+// when a stuck run is given up on.
+const AGENT_DIR = process.env.HERALD_AGENT_DIR ? resolve(process.env.HERALD_AGENT_DIR) : join(HERE, 'agent')
+const HERALD_AGENT_PERM = process.env.HERALD_AGENT_PERMISSION_MODE || 'bypassPermissions'
+const HERALD_AGENT_MODEL = process.env.HERALD_AGENT_MODEL || ''
+const HERALD_AGENT_TIMEOUT_MS = Number(process.env.HERALD_AGENT_TIMEOUT_MS) || 15 * 60 * 1000
+// The dedicated tmux session (`__herald-agent`) that holds one window per in-flight HERALD agent.
+// Reserved (below) so herald's reaper never kills it; it disappears on its own once its last agent
+// window is torn down. Kept out of `~/_dev` name-resolution — it's never a real `.herald` session.
+const AGENT_SESSION_LABEL = 'herald-agent'
 // macOS only: the terminal app to bring to the foreground on a `show`/`!`, so a reveal
 // surfaces the window even under another app. Opt-in via `HERALD_TERM_APP` (e.g. `WezTerm`,
 // `iTerm`, `Terminal`); unset ⇒ no app foregrounding (the tmux client still switches).
 const TERM_APP = process.env.HERALD_TERM_APP
+// Jev-driven [NEEDS ATTENTION]: when a claude turn ends cleanly, herald normally latches [DONE].
+// With this on, the turn's final assistant message is first judged by TypeSafe's Jev model — if it
+// reads as "waiting on the human" (a question, follow-ups pending a go-ahead, a blocked/needs-a-
+// decision ending) the lane is flagged [NEEDS ATTENTION] and held instead of draining on. Enabled
+// only when `TYPESAFE_API_KEY` is set (the SDK reads it) and not explicitly disabled; a missing key,
+// an error, or a timeout falls back to plain [DONE] so a Jev outage never stalls the queue.
+// `HERALD_JEV_THRESHOLD` is the yes-probability cutoff (higher ⇒ fewer flags); `HERALD_JEV_TIMEOUT_MS`
+// bounds the call; `HERALD_JEV_MODEL` optionally pins a Jev model.
+const JEV_ATTENTION = !!process.env.TYPESAFE_API_KEY && process.env.HERALD_JEV_ATTENTION !== '0'
+const JEV_THRESHOLD = Number(process.env.HERALD_JEV_THRESHOLD) || 0.6
+const JEV_TIMEOUT_MS = Number(process.env.HERALD_JEV_TIMEOUT_MS) || 6000
+const JEV_MODEL = process.env.HERALD_JEV_MODEL || ''
 // Labels the controller never manages (a blacklist). Empty by default.
-const RESERVED = new Set<string>([])
+const RESERVED = new Set<string>([AGENT_SESSION_LABEL])
 const TICK_MS = 1000
 // How long to coalesce a burst of filesystem events from one save before waking the poll
 // loop early. Small enough that a `!` reveal reaches wezterm near-instantly, large enough to
@@ -344,6 +378,9 @@ interface Session {
 	// The `&name` widget calls in this session's block. Kept separate from `prompts` so the
 	// drain never touches them — a widget is a live display, not a queue item.
 	widgets: WidgetItem[]
+	// The `HERALD:` directives in this session's block. Kept separate from `prompts` for the same
+	// reason — they run a background agent on the files, never enter the queue or a tmux pane.
+	heralds: HeraldItem[]
 }
 
 // A parsed `&name [args]` line plus its current output. Single-line output renders inline on the
@@ -372,6 +409,34 @@ export interface WidgetItem {
 	hasOutput: boolean
 }
 
+// A parsed `HERALD: <directive>` line. Not a queue item and not a live display — a one-shot
+// request for a background headless claude to edit the `.herald` file(s). `directive` is the text
+// after `HERALD:`; `label`/`dir` name the session block it sits under (passed to the agent as
+// context so "here"/"this" resolve). `note` is an existing `-> ` summary directly below it: its
+// presence means the directive already ran (delete the note to re-run). `desiredNote` is the
+// summary to write below it this tick, once the agent finishes.
+export interface HeraldItem {
+	directive: string
+	lineIdx: number
+	indent: string
+	label: string
+	dir: string
+	note: { text: string; lineIdx: number } | null
+	desiredNote?: string | null
+	// An `[EXECUTING]` marker directly below the directive while its background agent runs — the
+	// herald-pass analogue of a prompt's frontier marker. `marker` is one parsed from the file;
+	// `desiredKind` is what this tick wants there (EXECUTING while running, null once the `-> ` note
+	// lands). Only EXECUTING is ever placed: a finished directive is marked by its `-> ` note, not a
+	// `[DONE]`. buildHeraldOps reconciles the two.
+	marker?: { kind: Kind; lineIdx: number } | null
+	desiredKind?: Kind | null
+	// A leading `!` (`!HERALD: …`): reveal the agent's tmux window once it exists. Fires once
+	// (`showNowFired`), then buildOps rewrites the line to `strippedLine` (without the `!`).
+	showNow?: boolean
+	showNowFired?: boolean
+	strippedLine?: string
+}
+
 // A prompt line starts with `prompt:` or the shorthand `:`. A run of colons or a
 // trailing number selects the lane/pane: `:`→1, `::`/`:2`→2, `:::`/`:3`→3, …
 const PROMPT_RE = /^(?:prompt:|(:+)(\d*))\s*/i
@@ -392,6 +457,12 @@ const CONT_RE = /^\|[ ]?/
 // pass): inert (never runs, no marker), attached to the prompt above it. Recognised here so a
 // non-sigil indented line isn't misread as a worktree. The `->` and one optional space strip.
 const NOTE_RE = /^->[ ]?/
+// A `HERALD: <directive>` line (any indent, including column 0) is a meta-directive: herald runs a
+// background claude to act on the `.herald` file(s) themselves. Case-sensitive `HERALD:` so it never
+// clashes with prose in a prompt body. It never enters the queue — an indented one is collected on
+// its session (like widgets), a column-0 one in the file's top-level `heralds` list; either way its
+// completion is recorded by a `-> ` note written below it.
+const HERALD_RE = /^HERALD:[ \t]*/
 // A sigil run of length `run` (e.g. `::` → 2) or an explicit `digits` suffix (which
 // wins) picks the 1-based lane. `prompt:`/plain sigils fall through to lane 1.
 const paneFromSigil = (run: string | undefined, digits: string | undefined): number => (digits ? Math.max(1, parseInt(digits, 10) || 1) : run ? run.length : 1)
@@ -400,11 +471,14 @@ const clearAttention = (s: Session) => {
 	if (isAttention(s.desiredSession)) s.desiredSession = null
 }
 
-export function parse(content: string, aliases: Aliases = {}, macros: Macros = {}, widgets: Widgets = {}): { lines: string[]; sessions: Session[] } {
+export function parse(content: string, aliases: Aliases = {}, macros: Macros = {}, widgets: Widgets = {}): { lines: string[]; sessions: Session[]; heralds: HeraldItem[] } {
 	const lines = content.split('\n')
 	// The whole file is the sessions region; keep your backlog/footer in other
 	// files. Blank lines are skipped, so nothing else is preserved verbatim.
 	const sessions: Session[] = []
+	// Top-level (column-0) `HERALD:` directives — not attached to any session. Collected here so a
+	// directive can sit anywhere in the file, not only indented under a repo/worktree.
+	const heralds: HeraldItem[] = []
 	let cur: Session | null = null
 	// The prompt/command a deeper-indented line would continue. Set right after a `:`/`$`
 	// line, cleared by anything else (header, marker, barrier, blank-separated item).
@@ -412,6 +486,9 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 	// The widget a deeper `| ` line would extend as output. Set right after an `&name` line,
 	// cleared by anything that isn't one of its output lines (mirrors lastPrompt).
 	let lastWidget: WidgetItem | null = null
+	// The top-level `HERALD:` directive a following indented `-> ` note attaches to (it has no
+	// session container). Set right after a column-0 HERALD line, cleared by the next column-0 line.
+	let lastTopHerald: HeraldItem | null = null
 	// The enclosing repo/worktree stack (by indent). Queue items attach to the deepest one
 	// they sit under; a non-sigil line opens a new worktree container. Reset per header.
 	let containers: { indent: number; session: Session }[] = []
@@ -429,6 +506,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		if (tabs.length === 0) {
 			lastPrompt = null
 			lastWidget = null
+			lastTopHerald = null
 			// A column-0 `#` is a plain comment (it sits between sessions, so there is no
 			// queue to halt): ignored and preserved verbatim, like a blank line. It also
 			// closes the current session block, so an indented line beneath it (e.g. a
@@ -438,10 +516,69 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				containers = []
 				continue
 			}
+			// A column-0 `HERALD:` directive: a top-level meta-command (not under any session). Caught
+			// before the header / `<repo>:<worktree>` colon logic so the `:` in `HERALD:` isn't read as
+			// a worktree split. Like a comment it ends the current session block; its `-> ` note (an
+			// indented line right below) attaches via lastTopHerald in the `!cur` branch.
+			if (HERALD_RE.test(line.trim())) {
+				const t0 = line.trim()
+				const item: HeraldItem = {
+					directive: t0.replace(HERALD_RE, '').trim(),
+					lineIdx: i,
+					indent: tabs,
+					label: '', // resolved to the control-file basename in the herald pass
+					dir: '',
+					note: null,
+					showNow: leadingBang || undefined,
+					strippedLine: leadingBang ? tabs + t0 : undefined,
+				}
+				heralds.push(item)
+				lastTopHerald = item
+				cur = null
+				containers = []
+				continue
+			}
 			const raw = line.trim()
 			// A leading `!` on the header means "show this session immediately".
 			const showNow = leadingBang
 			const header = raw
+			// Concatenated worktree syntax: `<repo>:<worktree>` at column 0 is exactly a bare
+			// `<worktree>` line indented under a `<repo>` header — the same worktree session, without
+			// having to nest. Split on the first `:` (unless the whole header is itself a known alias,
+			// so a colon in an alias key still wins); the left resolves like any repo header, the right
+			// names the worktree. The base repo gets no session of its own — an inert bare header never
+			// spawns anyway — so it's just the worktree here, indent-0, its label/dir/base identical to
+			// the nested form (`<repo>-<name>`, `<repo>-worktrees/<name>`) so state files line up.
+			const colon = header.indexOf(':')
+			if (colon > 0 && !aliases[header]) {
+				const repoPart = header.slice(0, colon).trim()
+				const name = header.slice(colon + 1).trim()
+				if (repoPart && name) {
+					const { label: baseLabel, dir: baseDir } = resolveTarget(repoPart, aliases)
+					const wtCfg = aliasWorktree(aliases[repoPart])
+					cur = {
+						label: `${baseLabel}-${name}`,
+						dir: join(dirname(baseDir), `${basename(baseDir)}-worktrees`, name),
+						worktreeBase: baseDir,
+						worktreeCmd: wtCfg?.cmd,
+						worktreeCopy: wtCfg?.copy,
+						headerIdx: i,
+						lastChildIdx: i,
+						prompts: [],
+						sessionMarker: null,
+						desiredSession: null,
+						header,
+						indent: '',
+						showNow,
+						showNowFired: false,
+						widgets: [],
+						heralds: [],
+					}
+					sessions.push(cur)
+					containers = [{ indent: 0, session: cur }]
+					continue
+				}
+			}
 			const { label, dir } = resolveTarget(header, aliases)
 			const wtCfg = aliasWorktree(aliases[header])
 			cur = {
@@ -459,12 +596,23 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				showNow,
 				showNowFired: false,
 				widgets: [],
+				heralds: [],
 			}
 			sessions.push(cur)
 			containers = [{ indent: 0, session: cur }]
 			continue
 		}
-		if (!cur) continue
+		if (!cur) {
+			// Outside any session, the only indented lines we capture sit directly under a top-level
+			// `HERALD:` directive: its `-> ` done-note, or its live `[EXECUTING]` marker. Everything
+			// else is ignored.
+			if (lastTopHerald && NOTE_RE.test(line.trim())) lastTopHerald.note = { text: line.trim().replace(NOTE_RE, ''), lineIdx: i }
+			else if (lastTopHerald && /^\[executing\]$/i.test(line.trim())) {
+				lastTopHerald.marker = { kind: 'EXECUTING', lineIdx: i }
+				lastTopHerald.desiredKind = 'EXECUTING'
+			}
+			continue
+		}
 		cur.lastChildIdx = i
 		const t = line.trim()
 		// A `|` line continues the prompt above it — a multiline body (e.g. a pasted error),
@@ -570,6 +718,21 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				showNowInline: leadingBang || undefined,
 				strippedLine: leadingBang ? tabs + t : undefined,
 			})
+		} else if (HERALD_RE.test(t)) {
+			// A `HERALD: <directive>` line: a one-shot request for a background agent to edit the
+			// `.herald` file(s). Collected on the session (not the queue); its `-> ` note (attached
+			// in the NOTE_RE branch below) marks it done. A leading `!` (stripped above) reveals the
+			// agent's window once it's up, like a `!` on a prompt; the `!` is consumed once revealed.
+			target.heralds.push({
+				directive: t.replace(HERALD_RE, '').trim(),
+				lineIdx: i,
+				indent: tabs,
+				label: target.label,
+				dir: target.dir,
+				note: null,
+				showNow: leadingBang || undefined,
+				strippedLine: leadingBang ? tabs + t : undefined,
+			})
 		} else if (PROMPT_RE.test(t) || CMD_RE.test(t)) {
 			// A leading `!` (stripped above) reveals this item's window now — the shell for a
 			// `$command`, the claude pane otherwise — like a leading `!` on its marker. It's
@@ -672,9 +835,15 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 								? 'DONE'
 								: null
 			// A status marker attaches to the nearest preceding prompt (in this container)
-			// without a marker; anything unrecognised (e.g. [NO DIR …]) is a session marker.
+			// without a marker; anything unrecognised (e.g. [NO DIR …]) is a session marker. A
+			// `HERALD:` directive can also own an `[EXECUTING]` marker — if one sits nearer than any
+			// unmarked prompt, it wins (same nearest-item rule the `-> ` note pass uses).
 			const owner = kind ? [...target.prompts].reverse().find((p) => !p.marker && !p.isBarrier && !p.isShow) : undefined
-			if (kind && owner) {
+			const heraldOwner = kind ? [...target.heralds].reverse().find((h) => !h.marker) : undefined
+			if (kind && heraldOwner && (!owner || heraldOwner.lineIdx > owner.lineIdx)) {
+				heraldOwner.marker = { kind, lineIdx: i }
+				heraldOwner.desiredKind = kind
+			} else if (kind && owner) {
 				owner.marker = { kind, lineIdx: i }
 				owner.desiredKind = kind
 				if (bang) owner.showNow = true
@@ -683,11 +852,15 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				target.desiredSession = body
 			}
 		} else if (NOTE_RE.test(t)) {
-			// A `-> <summary>` line herald wrote below a finished prompt. Inert (no marker, never
-			// runs); attach it to the nearest preceding prompt so buildOps won't re-add it. It's
-			// caught here, before the worktree case, so the non-sigil line isn't read as a worktree.
-			const owner = [...target.prompts].reverse().find((p) => !p.isBarrier && !p.isShow)
-			if (owner) owner.note = { text: t.replace(NOTE_RE, ''), lineIdx: i }
+			// A `-> <summary>` line herald wrote below a finished prompt or `HERALD:` directive.
+			// Inert (no marker, never runs); attach it to the nearest preceding item so buildOps
+			// won't re-add it. Caught here, before the worktree case, so the non-sigil line isn't
+			// read as a worktree. A `HERALD:` directive above wins when it's nearer than any prompt.
+			const promptOwner = [...target.prompts].reverse().find((p) => !p.isBarrier && !p.isShow)
+			const heraldOwner = target.heralds[target.heralds.length - 1]
+			const note = { text: t.replace(NOTE_RE, ''), lineIdx: i }
+			if (heraldOwner && (!promptOwner || heraldOwner.lineIdx > promptOwner.lineIdx)) heraldOwner.note = note
+			else if (promptOwner) promptOwner.note = note
 		} else {
 			// A non-sigil indented line names a git worktree of its container's repo. It's a
 			// child session whose dir (<repo>/../<repo>-worktrees/<name>) is created on demand — only
@@ -716,17 +889,39 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				showNow,
 				showNowFired: false,
 				widgets: [],
+				heralds: [],
 			}
 			sessions.push(wt)
 			containers.push({ indent: d, session: wt })
 		}
 	}
-	return { lines, sessions }
+	return { lines, sessions, heralds }
 }
 
 // ------------------------------------------------- lossless in-place rewrite
 
 type Op = { pos: number; type: 'replace' | 'delete' | 'insert'; text?: string }
+
+// Rewrite ops for a set of `HERALD:` directives (session-attached or top-level): mirror a finished
+// directive's `-> ` summary just below its line, once (the note then marks it done — parse won't
+// re-run it; idempotent via the `!item.note` guard), and consume a fired `!HERALD:` reveal by
+// rewriting the line without its `!`.
+export function buildHeraldOps(items: HeraldItem[]): Op[] {
+	const ops: Op[] = []
+	for (const item of items) {
+		if (item.showNowFired && item.strippedLine !== undefined) ops.push({ pos: item.lineIdx, type: 'replace', text: item.strippedLine })
+		if (item.desiredNote != null && !item.note) ops.push({ pos: item.lineIdx, type: 'insert', text: `${item.indent}\t-> ${item.desiredNote}` })
+		// Reconcile the `[EXECUTING]` marker: write it just below the directive while the agent
+		// runs, drop it once the run ends (the `-> ` note, inserted above, takes its place).
+		const cur = item.marker?.kind ?? null
+		const want = item.desiredKind ?? null
+		if (cur !== want) {
+			if (item.marker) ops.push(want === null ? { pos: item.marker.lineIdx, type: 'delete' } : { pos: item.marker.lineIdx, type: 'replace', text: `${item.indent}\t${MARKER[want]}` })
+			else if (want !== null) ops.push({ pos: item.lineIdx, type: 'insert', text: `${item.indent}\t${MARKER[want]}` })
+		}
+	}
+	return ops
+}
 
 // `skip` names sessions whose header is being removed wholesale this tick (see
 // vacatedSessions) — their marker/note ops are pointless, so we don't emit them.
@@ -783,6 +978,7 @@ export function buildOps(sessions: Session[], skip?: Set<Session>): Op[] {
 				ops.push({ pos: p.bodyEndIdx, type: 'insert', text: `${p.indent}\t${MARKER[p.desiredKind]}` })
 			}
 		}
+		ops.push(...buildHeraldOps(s.heralds))
 		// A fired "show now" (`!` on a repo header or worktree label) is consumed by
 		// stripping the `!`; the leading indent (empty for a repo header) is preserved.
 		if (s.showNow && s.showNowFired) ops.push({ pos: s.headerIdx, type: 'replace', text: `${s.indent ?? ''}${s.header}` })
@@ -873,9 +1069,10 @@ export function vacatedSessions(sessions: Session[], liveLabels: Set<string>): {
 	for (const s of [...ordered].reverse()) {
 		const kids = children.get(s)!
 		liveSub.set(s, liveLabels.has(s.label) || kids.some((k) => liveSub.get(k)!))
-		// A widget makes a session "occupied" the same way a prompt does — a live status
-		// display with no queued work must not be reaped out from under its `&name` line.
-		if (s.prompts.length === 0 && s.widgets.length === 0 && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
+		// A widget or an unfinished `HERALD:` directive makes a session "occupied" the same way a
+		// prompt does — a live display or a still-running directive must not be reaped from under its
+		// line. A directive that already has its `-> ` note is done, so it no longer holds the session.
+		if (s.prompts.length === 0 && s.widgets.length === 0 && s.heralds.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
 	}
 	const tops = ordered.filter((s) => removed.has(s) && !(parent.get(s) && removed.has(parent.get(s)!)))
 	return { tops, all: removed }
@@ -1013,6 +1210,12 @@ interface LaneRt {
 	// input a human typed straight into the pane. Each is matched-and-dropped once.
 	pendingSent?: string[]
 	pendingSentCmd?: string[]
+	// Jev attention latch (JEV_ATTENTION only), keyed on the turn's Stop mtime so it's computed
+	// once per turn and reused on the lingering-Stop ticks that follow. `attnAt` is that Stop's
+	// mtime; `attention` its verdict. A newer Stop (a new turn) is a different mtime, so the
+	// judgment is re-run rather than the stale verdict re-applied.
+	attnAt?: number
+	attention?: boolean
 }
 // The subset planQueue itself touches — lets tests pass a plain object.
 type QueueRt = Pick<LaneRt, 'sentAt' | 'cmdSentAt' | 'prevPromptCount' | 'macroStep'>
@@ -1029,6 +1232,11 @@ interface RtEntry {
 	// Per-widget refresh gate, keyed `name#occurrence` within this label: when it last ran, so a
 	// widget only reruns once its `interval` has elapsed (survives restarts via controller.json).
 	widgets?: Record<string, { lastRun: number }>
+	// In-flight HERALD directives, keyed by directive hash + occurrence within this label. `startedAt`
+	// is when the agent window was created (times out a stuck run); `sentAt` is when the directive was
+	// typed in (0 until then — gates the boot grace, and its Stop must be newer to count as finished).
+	// Persisted so a run is tracked across restarts.
+	heralds?: Record<string, { startedAt: number; sentAt: number }>
 }
 type Rt = Record<string, RtEntry>
 
@@ -1056,8 +1264,8 @@ interface StateEvent {
 // `<label>.<n>.json`/`<label>.<n>.cmd`, matching the `HERALD_PANE` suffix the hooks add.
 const paneSuffix = (n: number) => (n > 1 ? `.${n}` : '')
 const statePath = (label: string, n: number) => join(STATE, `${label}${paneSuffix(n)}.json`)
-function readState(label: string, n: number): StateEvent | null {
-	const p = statePath(label, n)
+// Read + parse a Stop/Notification hook state file at `p` (the newest event for that pane).
+function readStateFile(p: string): StateEvent | null {
 	try {
 		const parsed = JSON.parse(readFileSync(p, 'utf8'))
 		return { event: parsed.event as string, notify: parsed.raw?.notification_type as string | undefined, mtimeMs: statSync(p).mtimeMs }
@@ -1065,14 +1273,15 @@ function readState(label: string, n: number): StateEvent | null {
 		return null
 	}
 }
-// The `-> ` summary from the claude turn that just finished: follow the transcript path in
-// the lane's last hook payload, take the newest assistant message's text, and return its last
-// `-> …` line (the launch instruction asks claude to end each turn with one). Null when the
-// transcript is unreadable or has no such line — the note pass then writes nothing.
-function readAssistantNote(label: string, n: number): string | null {
+const readState = (label: string, n: number): StateEvent | null => readStateFile(statePath(label, n))
+// The newest assistant message's full text from the transcript the hook payload at `path` points
+// to (follow `raw.transcript_path`, take the last `assistant` entry, join its text parts). Null when
+// the payload/transcript is unreadable or has no assistant message. The source for both the `-> `
+// summary and the Jev attention judgment.
+function assistantTextFromState(path: string): string | null {
 	let tpath: unknown
 	try {
-		tpath = JSON.parse(readFileSync(statePath(label, n), 'utf8')).raw?.transcript_path
+		tpath = JSON.parse(readFileSync(path, 'utf8')).raw?.transcript_path
 	} catch {
 		return null
 	}
@@ -1083,7 +1292,7 @@ function readAssistantNote(label: string, n: number): string | null {
 	} catch {
 		return null
 	}
-	let text = ''
+	let text: string | null = null
 	for (const line of content.split('\n')) {
 		if (line.trim() === '') continue
 		try {
@@ -1094,6 +1303,52 @@ function readAssistantNote(label: string, n: number): string | null {
 			}
 		} catch {}
 	}
+	return text
+}
+// The `-> ` summary from the claude turn that just finished: the last `-> …` line of the newest
+// assistant message (the launch instruction asks claude to end each turn with one). Null when the
+// transcript is unreadable or has no such line — the note pass then writes nothing.
+function noteFromState(path: string): string | null {
+	const text = assistantTextFromState(path)
+	return text === null ? null : extractNote(text)
+}
+const readAssistantText = (label: string, n: number): string | null => assistantTextFromState(statePath(label, n))
+// A lazily-built TypeSafe client (constructed only when JEV_ATTENTION fires, so a missing
+// `TYPESAFE_API_KEY` never throws at startup).
+let jevClient: import('@typesafe-ai/sdk').TypeSafeClient | null = null
+// Ask Jev for the probability that `text` — the final assistant message of a finished turn — leaves
+// the human with something to do (a question, follow-ups awaiting a go-ahead, a blocked/needs-a-
+// decision ending). Returns the 0–1 probability, or null when disabled/empty or on any failure (no
+// key, network, timeout, bad shape) — the caller then falls back to a plain [DONE]. Never throws.
+async function jevAttentionProb(text: string): Promise<number | null> {
+	if (!JEV_ATTENTION || !text.trim()) return null
+	try {
+		const { TypeSafeClient, noul } = await import('@typesafe-ai/sdk')
+		jevClient ??= new TypeSafeClient(JEV_MODEL ? { defaultModel: JEV_MODEL } : {})
+		const res = await jevClient.systemOne(
+			{
+				state: { finalMessage: text },
+				questions: {
+					needsAttention: noul(
+						"This is the final message an autonomous coding agent (Claude) posted at the end of its turn. Judge whether it leaves the human operator with something to do or decide before the work is resolved — e.g. it asks the user a question, proposes follow-up actions and awaits a go-ahead, reports being blocked, or requests a decision, approval, or credential.",
+						{
+							true: 'The agent is waiting on the user: it poses a question, offers follow-ups pending approval, or is blocked needing a human decision or action before it can continue.',
+							false: 'The agent reports the task finished with nothing outstanding for the user; any next steps are things it will handle itself or are purely informational.',
+						},
+					),
+				},
+			},
+			{ timeout: JEV_TIMEOUT_MS },
+		)
+		return res.answers.needsAttention.noul ?? null
+	} catch (e) {
+		log(`WARN jev attention check failed: ${(e as Error).message}`)
+		return null
+	}
+}
+// The last `-> …` line in a blob of text, its `->` prefix stripped, or null if there is none.
+// Shared by the transcript reader and the HERALD agent's captured stdout.
+function extractNote(text: string): string | null {
 	const noteLine = text
 		.split('\n')
 		.map((l) => l.trim())
@@ -1133,9 +1388,11 @@ const rmCmdDone = (label: string, n: number) => {
 	} catch {}
 }
 // Remove every lane's state files for a label (session teardown), including numbered
-// panes and the capture logs, so a later reuse of the label doesn't read stale input.
+// panes, the capture logs, and any in-flight HERALD agent files, so a later reuse of the
+// label doesn't read stale input.
 const rmAllDoneFiles = (label: string) => {
-	const re = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.\\d+)?\\.(json|cmd|in|incmd)$`)
+	const l = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+	const re = new RegExp(`^${l}(?:(?:\\.\\d+)?\\.(json|cmd|in|incmd)|\\.herald\\..*)$`)
 	for (const f of readdirSync(STATE)) {
 		if (re.test(f)) {
 			try {
@@ -1144,6 +1401,43 @@ const rmAllDoneFiles = (label: string) => {
 		}
 	}
 }
+// A short, stable key for a HERALD directive: a hash of its text plus its occurrence within the
+// label, so line-number shifts don't change it and two identical directives don't collide. Keys the
+// agent window's `@herald` tag, its Stop-hook state file, and its in-flight rt record.
+const heraldHash = (s: string): string => {
+	let h = 5381
+	for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0
+	return h.toString(36)
+}
+// The HERALD agent's per-run state file, written by the agent `claude`'s Stop hook: its
+// `HERALD_PANE` is set to `herald.<key>`, so the hook lands its payload (event + transcript path)
+// here. `<label>.herald.<key>.json` never collides with a lane's numeric-suffixed state file.
+const heraldFile = (label: string, key: string, ext: string) => join(STATE, `${label}.herald.${key}.${ext}`)
+const rmHeraldFiles = (label: string, key: string) => {
+	const prefix = `${label}.herald.${key}.`
+	for (const f of readdirSync(STATE)) if (f.startsWith(prefix)) {
+		try {
+			unlinkSync(join(STATE, f))
+		} catch {}
+	}
+}
+// The prompt fed to a HERALD agent: the directive plus where it came from, so "here"/"this" resolve.
+const heraldPrompt = (item: HeraldItem, filePath: string): string =>
+	[
+		item.directive,
+		'',
+		'---',
+		'This directive comes from a herald control file. Location:',
+		`  file: ${filePath}`,
+		`  line: ${item.lineIdx + 1}   (the "HERALD:" line)`,
+		`  session block: ${item.label}${item.dir ? `   (repo dir: ${item.dir})` : ''}`,
+		'',
+		'Words like "here", "this", "this worktree", "this lane" refer to that location in that file.',
+		'Read the file to understand the surrounding session / worktree / lane structure, then make the',
+		'requested edits to the .herald file(s). Keep the "HERALD:" line itself intact — do not delete or',
+		'rewrite it — and do not add the "-> " summary line yourself (herald writes that from your reply).',
+		'End your reply with a "-> " one-line summary as usual. See CLAUDE.md for the .herald format.',
+	].join('\n')
 // Remove just one lane's state files (single-lane teardown), so its numbered done/capture
 // logs don't linger — or get re-read — after the lane's panes are gone.
 const rmLaneFiles = (label: string, n: number) => {
@@ -1704,20 +1998,18 @@ async function reapLane(label: string, n: number, re: RtEntry) {
 // with. Only clients parked on a controller-managed (`__*`) session are eligible, so a
 // reveal never yanks a terminal you've parked on your own unrelated (non-`__`) work.
 // Run outside tmux there is no "current" client, so we target it by name.
-async function showSession(label: string, window?: Window) {
+async function showSession(label: string, window?: Window, explicitPane?: string) {
 	log(`showing ${T(label)}${window ? ` (${paneRole(window.kind, window.n)})` : ''}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
 	// Bring the configured terminal (the one watching these sessions) to the foreground, so a
 	// `show`/`!` actually surfaces it even when another app is focused. macOS + opt-in only.
 	if (process.platform === 'darwin' && TERM_APP) await tm`osascript -e ${`tell application "${TERM_APP}" to activate`}`
-	// Reveal the window the caller asked for (e.g. the shell for a `$command` show, or a
-	// numbered lane's pane), so switching the client lands on it rather than the session's
-	// last-active window.
-	if (window) {
-		const pane = await paneFor(label, window.kind, window.n)
-		if (pane) await tm`tmux select-window -t ${pane}`
-	}
+	// Reveal a specific window before switching the client: an explicit pane id (a HERALD agent
+	// window), or the lane/kind the caller named (the shell for a `$command` show, a numbered lane's
+	// pane), so the switch lands on it rather than the session's last-active window.
+	const pane = explicitPane ?? (window ? await paneFor(label, window.kind, window.n) : null)
+	if (pane) await tm`tmux select-window -t ${pane}`
 	const r = await tm`tmux list-clients -F ${'#{client_name}\t#{client_session}\t#{client_activity}'}`
 	const clients = r.stdout
 		.split('\n')
@@ -1733,6 +2025,67 @@ async function showSession(label: string, window?: Window) {
 	// session — the terminal you last touched — so the reveal lands where you're looking.
 	const watching = clients.filter(([, session]) => session?.startsWith(PREFIX)).sort(([, , a], [, , b]) => Number(b) - Number(a))
 	if (watching.length) await tm`tmux switch-client -c ${watching[0][0]} -t ${T(label)}`
+}
+
+// ---------------------------------------------------------- HERALD agent windows
+// A HERALD directive runs a real `claude` in its own window inside the dedicated `__herald-agent`
+// session, tagged `@herald <key>`. Its claude reports completion through the same Stop hook as a
+// lane (HERALD_PANE=`herald.<key>` → state/<label>.herald.<key>.json), so we read the `-> ` summary
+// from its transcript exactly like a finished prompt.
+
+// The agent window's pane for `key`, matched by its `@herald <key>` tag. Null if absent.
+async function heraldAgentPane(key: string): Promise<string | null> {
+	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(AGENT_SESSION_LABEL)} -F ${'#{pane_id}\t#{@herald}'}`
+	for (const line of r.stdout.split('\n')) {
+		const [id, tag] = line.split('\t')
+		if (id && tag === key) return id
+	}
+	return null
+}
+// Create the agent window for `item` and launch `claude` in it: cwd = the agent dir (its CLAUDE.md),
+// the control dir added so it can edit the files, and a permission mode that needs no prompts. The
+// directive itself is typed in later (sendHeraldDirective), once claude has booted. The dedicated
+// `__herald-agent` session is created on first use; the window is named for the target label.
+async function spawnHeraldAgent(item: HeraldItem, key: string) {
+	log(`herald agent ${T(item.label)}: launch ${JSON.stringify(item.directive)}`)
+	if (DRY) return
+	const tm = $({ nothrow: true, quiet: true })
+	const cwd = existsSync(AGENT_DIR) ? AGENT_DIR : CONTROL_DIR
+	// HERALD_PANE=`herald.<key>` routes the agent's Stop hook to state/<label>.herald.<key>.json.
+	const env = ['-e', `HERALD_LABEL=${item.label}`, '-e', `HERALD_STATE=${STATE}`, '-e', `HERALD_PANE=herald.${key}`]
+	const has = (await tm`tmux has-session -t ${T(AGENT_SESSION_LABEL)}`).exitCode === 0
+	const pane = has
+		? (await tm`tmux new-window -P -F ${'#{pane_id}'} -t ${T(AGENT_SESSION_LABEL)} -n ${item.label} -c ${cwd} ${env}`).stdout.trim()
+		: (await tm`tmux new-session -d -s ${T(AGENT_SESSION_LABEL)} -n ${item.label} -c ${cwd} ${env} -P -F ${'#{pane_id}'}`).stdout.trim()
+	await tm`tmux set-option -p -t ${pane} @herald ${key}`
+	let cmd = `${AGENT_CMD} --permission-mode ${HERALD_AGENT_PERM} --add-dir '${CONTROL_DIR}' --append-system-prompt-file '${buildSystemPromptFile()}'`
+	if (HERALD_AGENT_MODEL) cmd += ` --model ${HERALD_AGENT_MODEL}`
+	await sleep(300)
+	await typeInto(pane, cmd)
+}
+// Type the directive prompt into the (booted) agent pane, like any herald prompt (vim-insert +
+// bracketed paste for the multiline block). No-op if the window is gone.
+async function sendHeraldDirective(item: HeraldItem, key: string, filePath: string) {
+	log(`herald agent ${T(item.label)}: prompt`)
+	if (DRY) return
+	const pane = await heraldAgentPane(key)
+	if (pane) await typeInto(pane, heraldPrompt(item, filePath), true)
+}
+// Whether the agent's pane is mid-turn (same spinner read as a lane); false if the window is gone.
+async function heraldAgentBusy(key: string): Promise<boolean> {
+	if (DRY) return false
+	const pane = await heraldAgentPane(key)
+	if (!pane) return false
+	const r = await $({ nothrow: true, quiet: true })`tmux capture-pane -p -t ${pane}`
+	return r.exitCode === 0 && paneWorking(r.stdout)
+}
+// Tear down a finished/cancelled agent: kill its window (the `__herald-agent` session dies with its
+// last window) and drop its state files.
+async function teardownHeraldAgent(label: string, key: string) {
+	rmHeraldFiles(label, key)
+	if (DRY) return
+	const pane = await heraldAgentPane(key)
+	if (pane) await $({ nothrow: true, quiet: true })`tmux kill-window -t ${pane}`
 }
 
 const atomicWrite = (path: string, content: string) => {
@@ -1839,6 +2192,11 @@ export interface PlanIO {
 	// `<task-notification>` will resume claude with no hook, so the lane stays held (no dispatch)
 	// until the background work finishes. undefined = unknown/unread.
 	paneBackground?: boolean
+	// Jev's verdict for this turn (JEV_ATTENTION only): the finished turn's final assistant message
+	// reads as "waiting on the human". A turn end then latches [NEEDS ATTENTION] (held, not drained)
+	// instead of [DONE]. Computed once per turn by the caller and reused across the lingering-Stop
+	// ticks; undefined/false ⇒ the ordinary [DONE].
+	needsAttention?: boolean
 }
 
 // Nearest pending item above `idx` in drain order (the next to run, drain being
@@ -2095,8 +2453,16 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 			// Settles to [DONE] once the background work clears (the Stop branch below).
 			active.desiredKind = 'WAITING'
 		} else if (isTurnEnd(io.state, rt.sentAt)) {
-			active.desiredKind = 'DONE'
-			drainUp(active.order, active)
+			if (io.needsAttention) {
+				// The turn ended cleanly, but Jev judged its final message as leaving the human
+				// something to do (a question / follow-ups awaiting a go-ahead / a blocked ending).
+				// Flag it and hold the lane — like a blocking Notification — rather than draining on;
+				// answering in the pane (UserPromptSubmit, below) clears it back to [EXECUTING].
+				active.desiredKind = 'ATTENTION'
+			} else {
+				active.desiredKind = 'DONE'
+				drainUp(active.order, active)
+			}
 		} else if (io.state && io.state.event === 'UserPromptSubmit' && io.state.mtimeMs > rt.sentAt) {
 			// A prompt was submitted into the pane — the user answered a blocking
 			// question — so Claude is working again: clear [NEEDS ATTENTION] back to
@@ -2133,7 +2499,10 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 	// forever. Fire any such stranded clear here regardless of where the frontier sits: it's
 	// eligible the moment nothing below it in the lane is still pending, running, errored, or
 	// walled off by a barrier (any of which means the run below it hasn't actually completed).
-	const frontier = frontierIdx(s)
+	// The frontier here is the top-most *marked* item — including the live EXECUTING/ATTENTION/
+	// WAITING markers, not just DONE/ERROR as frontierIdx counts: an item still executing above the
+	// `%` means the drain has already climbed past it, so the runs below are stranded cruft too.
+	const frontier = s.prompts.reduce((m, p) => (p.desiredKind != null && p.order < m ? p.order : m), Number.POSITIVE_INFINITY)
 	for (const c of s.prompts) {
 		if (!c.isClear || c.fired) continue
 		// When a finished run sits *above* the `%` (frontier before it), the climbing drain will
@@ -2160,6 +2529,8 @@ interface Control {
 	content: string
 	lines: string[]
 	sessions: Session[]
+	// Top-level (column-0) `HERALD:` directives in this file — not attached to any session.
+	heralds: HeraldItem[]
 	mtime: number
 }
 
@@ -2180,8 +2551,8 @@ async function tick(rt: Rt) {
 		// Macros expand IN MEMORY inside parse (the `@name` line stays in the file); only the
 		// single overall marker is ever written back.
 		const content = readFileSync(path, 'utf8')
-		const { lines, sessions } = parse(content, aliases, macros, widgets)
-		return { path, content, lines, sessions, mtime }
+		const { lines, sessions, heralds } = parse(content, aliases, macros, widgets)
+		return { path, content, lines, sessions, heralds, mtime }
 	})
 	// Merge into one global session list; the first file (alphabetical) to claim a
 	// tmux label wins, later duplicates are skipped so only one driver owns each session.
@@ -2432,11 +2803,25 @@ async function tick(rt: Rt) {
 					(p) => p.pane === n && p.desiredKind === 'EXECUTING' && !p.isCmd && !p.isMacro && !p.isBarrier && !p.isShow && !p.note && p.text.trim() !== '/clear',
 				)
 				if (done) {
-					const summary = readAssistantNote(label, n)
-					if (summary) done.desiredNote = summary
+					// One transcript read serves both the `-> ` summary and the Jev attention
+					// judgment. Jev runs at most once per turn: latched on this Stop's mtime, so the
+					// lingering-Stop ticks that follow reuse the verdict (by then the item is [NEEDS
+					// ATTENTION]/noted, so `done` no longer matches anyway).
+					const text = readAssistantText(label, n)
+					if (text !== null) {
+						const summary = extractNote(text)
+						if (summary) done.desiredNote = summary
+						if (JEV_ATTENTION && lr.attnAt !== state!.mtimeMs) {
+							const prob = await jevAttentionProb(text)
+							lr.attention = prob !== null && prob >= JEV_THRESHOLD
+							lr.attnAt = state!.mtimeMs
+							if (prob !== null) log(`jev ${T(label)}${n > 1 ? `:${n}` : ''}: p=${prob.toFixed(2)} (≥${JEV_THRESHOLD}?) → ${lr.attention ? '[NEEDS ATTENTION]' : '[DONE]'}`)
+						}
+					}
 				}
 			}
-			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, cmdDoneExit, paneBusy, paneBackground })
+			const needsAttention = JEV_ATTENTION && lr.attention === true && lr.attnAt === state?.mtimeMs
+			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, cmdDoneExit, paneBusy, paneBackground, needsAttention })
 			if (hadActiveCmd && cmdDoneMtime !== null && cmdDoneMtime > cmdSentAtBefore) rmCmdDone(label, n)
 			for (const d of dispatches) {
 				// Record what we send so the capture pass can tell it from human input (our sends
@@ -2469,6 +2854,83 @@ async function tick(rt: Rt) {
 		if (!s.parts) continue
 		s.parts[0].desiredSession = s.desiredSession
 		s.parts[0].showNowFired = s.showNowFired
+	}
+
+	// ---- herald pass: drive a visible `claude` window for each `HERALD:` directive ----
+	// A `HERALD:` directive runs a real claude in its own window in the `__herald-agent` session. It's
+	// a one-shot with a small lifecycle (recorded per key in rt): spawn the window → after the boot
+	// grace, type the directive → poll the agent's Stop hook → mirror its `-> ` summary below the
+	// directive and tear the window down. That note is the durable done-marker (delete it to re-run);
+	// a directive that already has a note is skipped. A `!HERALD:` reveals the window once it's up.
+	// Spawn/prompt/reveal/teardown are queued as `actions` so they run past the mid-tick defer; the
+	// note flows through buildOps below (same defer). Keyed like widgets (hash + occurrence).
+	if (!DRY) {
+		const now = Date.now()
+		const seen = new Map<string, Map<string, number>>() // label → (directive → occurrence)
+		const liveKeys = new Set<string>() // `label\0key` still present this tick (for cancel-teardown)
+		for (const c of controls) {
+			// Session-attached directives use their session's label; top-level (column-0) ones resolve
+			// to the control-file basename (e.g. `app.herald` → `app`) so they still have an rt/state
+			// namespace and an agent-window name.
+			const fileLabel = basename(c.path, CONTROL_EXT)
+			for (const item of [...c.sessions.flatMap((s) => s.heralds), ...c.heralds]) {
+				{
+					if (!item.label) item.label = fileLabel
+					if (item.note) continue // already ran — a `-> ` note sits below it
+					// In progress until proven otherwise: the marker below reflects this, and the two
+					// terminal branches (timeout, finished) clear it as they write the `-> ` note.
+					item.desiredKind = 'EXECUTING'
+					const perLabel = seen.get(item.label) ?? new Map<string, number>()
+					seen.set(item.label, perLabel)
+					const occ = perLabel.get(item.directive) ?? 0
+					perLabel.set(item.directive, occ + 1)
+					const key = `${heraldHash(item.directive)}-${occ}`
+					liveKeys.add(`${item.label}\0${key}`)
+					const entry = (rt[item.label] ??= { starting: true, startedAt: 0, lanes: {} })
+					entry.heralds ??= {}
+					const rec = entry.heralds[key]
+					// All rt mutations live inside actions, which run only past the mid-tick defer — so a
+					// deferred tick leaves rt untouched and the phase simply retries next tick (no double-
+					// spawn, no phantom "sent"). Teardown deletes the record and kills the window together.
+					const teardown = () => actions.push(async () => (await teardownHeraldAgent(item.label, key), void delete entry.heralds![key]))
+					if (!rec) {
+						// First sighting: create the window + launch claude. The directive is typed in a
+						// later tick (once booted), so the file path is captured now for that step.
+						actions.push(async () => (entry.heralds![key] = { startedAt: Date.now(), sentAt: 0 }, void (await spawnHeraldAgent(item, key))))
+					} else if (rec.sentAt === 0) {
+						// Window up, claude booting: type the directive once the boot grace has passed.
+						if (now - rec.startedAt >= READY_MS) actions.push(async () => ((rec.sentAt = Date.now()), void (await sendHeraldDirective(item, key, c.path))))
+					} else if (now - rec.startedAt > HERALD_AGENT_TIMEOUT_MS) {
+						// Stuck run: give up so it can't wedge forever.
+						item.desiredNote = 'herald agent timed out'
+						item.desiredKind = null
+						teardown()
+					} else if (isTurnEnd(readStateFile(heraldFile(item.label, key, 'json')), rec.sentAt) && !(await heraldAgentBusy(key))) {
+						// The agent finished: mirror its `-> ` summary (fallback so it isn't re-run), tear down.
+						item.desiredNote = noteFromState(heraldFile(item.label, key, 'json')) ?? 'herald agent finished'
+						item.desiredKind = null
+						teardown()
+					}
+					// A `!HERALD:` reveals the agent window once it exists; consumed (strip `!`) when revealed.
+					if (item.showNow && !item.showNowFired) {
+						const pane = await heraldAgentPane(key)
+						if (pane) {
+							item.showNowFired = true
+							actions.push(() => showSession(AGENT_SESSION_LABEL, undefined, pane))
+						}
+					}
+				}
+			}
+		}
+		// Cancel-teardown: a directive whose line was deleted while its agent ran is gone from the
+		// model this tick — kill its orphaned window and drop its record (in the action, past the
+		// defer, so a deferred tick retries rather than orphaning the window).
+		for (const [label, e] of Object.entries(rt)) {
+			for (const key of Object.keys(e.heralds ?? {})) {
+				if (liveKeys.has(`${label}\0${key}`)) continue
+				actions.push(async () => (await teardownHeraldAgent(label, key), void delete e.heralds![key]))
+			}
+		}
 	}
 
 	// ---- widget pass: rerun each due `&name` widget and mirror its output back into the file ----
@@ -2543,7 +3005,7 @@ async function tick(rt: Rt) {
 	// block deleted; the next tick reaps the vacated tmux session (and worktree) via reapTargets.
 	for (const c of controls) {
 		const { tops, all } = vacatedSessions(c.sessions, live)
-		const ops = [...buildOps(c.sessions, all), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? []), ...(widgetOpsByPath.get(c.path) ?? [])]
+		const ops = [...buildOps(c.sessions, all), ...buildHeraldOps(c.heralds), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? []), ...(widgetOpsByPath.get(c.path) ?? [])]
 		const newContent = applyOps(c.lines, ops).join('\n')
 		if (newContent !== c.content) atomicWrite(c.path, newContent)
 	}

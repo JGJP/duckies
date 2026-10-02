@@ -38,6 +38,12 @@ syntax match heraldNote /^\t\+ *->.*$/
 " leading `!` ("show now") is matched by heraldShowNow below.
 syntax match heraldWorktree /\c^\t\+ *\%([#@&:$[|%]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
 
+" HERALD directive: a `HERALD: <text>` line (any indent, incl. column 0) runs a background agent to
+" edit the .herald files themselves. Case-sensitive (no \c) so prose never trips it; defined after
+" heraldHeader/heraldWorktree so it wins the whole line over those fallbacks (lowercase `herald:`
+" stays a header/worktree as before).
+syntax match heraldDirective /^[ \t]*HERALD:.*$/
+
 " Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane. Only the sigil is
 " highlighted (\zs starts the match after the indent); the text stays normal.
 syntax match heraldPromptSigil /^\t\+ *\zs\c\%(prompt\)\?:\+\d*/
@@ -99,5 +105,8 @@ highlight default heraldMacro guifg=#000000 guibg=#06c755 ctermfg=black ctermbg=
 " neither, keep no background).
 highlight default heraldWidget guifg=#ffffff guibg=#333333 ctermfg=15 ctermbg=236
 highlight default heraldWidgetOutput guifg=#ffffff guibg=#333333 ctermfg=15 ctermbg=236
+" HERALD directives: white on violet (#8b5cf6), matching the tui/Sublime setup; a meta-command
+" that edits the .herald files themselves. `default` so a colorscheme can override.
+highlight default heraldDirective guifg=#ffffff guibg=#8b5cf6 ctermfg=15 ctermbg=99
 
 let b:current_syntax = 'herald'

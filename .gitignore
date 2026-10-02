@@ -7,3 +7,4 @@ herald-aliases.yaml
 herald-macros.yaml
 herald-widgets.yaml
 .backup/
+.codemap/

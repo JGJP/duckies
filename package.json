@@ -43,6 +43,7 @@
 		"zx": "8.8.5"
 	},
 	"dependencies": {
+		"@typesafe-ai/sdk": "^0.6.0",
 		"node-diff3": "^3.2.1"
 	}
 }

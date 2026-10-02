@@ -63,5 +63,10 @@
 			"foreground": "#000000",
 			"background": "#ffe600",
 		},
+		{
+			"scope": "markup.other.directive.herald",
+			"foreground": "#ffffff",
+			"background": "#8b5cf6",
+		},
 	],
 }
