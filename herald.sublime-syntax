@@ -21,6 +21,20 @@ contexts:
     - match: '^[ \t]*!.*$'
       scope: markup.other.shownow.herald
 
+    # Sleep scope: a header or worktree label whose first non-tab char is `?` is slept (herald tears
+    # its tmux down but keeps the conversation). Grey the WHOLE scope — the `?` line and every line
+    # indented deeper than it — so the dormant block reads as inactive. `\1` captures the `?` line's
+    # indent; the pushed context greys each line until one not indented past it (the next sibling /
+    # header), mirroring parse()'s cascade. Matched before the item/label rules; no sigil starts `?`.
+    - match: '^(\t*)\?.*$\n?'
+      scope: markup.other.sleep.herald
+      push:
+        - meta_content_scope: markup.other.sleep.herald
+        - match: '^(?!\1\t)'
+          pop: true
+        - match: '.*\n?'
+          scope: markup.other.sleep.herald
+
     # Comment: any row starting with `#` (at any indent, incl. column 0) is ignored.
     - match: '^[ \t]*((#)[^\n]*)$'
       captures:

@@ -36,7 +36,7 @@ syntax match heraldNote /^\t\+ *->.*$/
 " Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
 " show/marker/note rows so only true labels match. Styled like a header (Identifier); a
 " leading `!` ("show now") is matched by heraldShowNow below.
-syntax match heraldWorktree /\c^\t\+ *\%([#@&:$[|%]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
+syntax match heraldWorktree /\c^\t\+ *\%([#@&:$[|%?]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
 
 " HERALD directive: a `HERALD: <text>` line (any indent, incl. column 0) runs a background agent to
 " edit the .herald files themselves. Case-sensitive (no \c) so prose never trips it; defined after
@@ -78,6 +78,13 @@ syntax match heraldWaiting /^\t\+ *\c\[[^\]]*waiting[^\]]*\]\s*$/
 " it wins over the same-length header/worktree/show matches it overlaps.
 syntax match heraldShowNow /^\s*!.*$/
 
+" Sleep scope: a header or worktree label whose first non-tab char is `?` is slept (tmux torn
+" down, conversation kept). Grey the WHOLE scope — the `?` line and every line indented deeper
+" than it. `\z(\t*\)` captures the `?` line's indent; the region ends (zero-width, so the ending
+" line is excluded) at the first line not indented past it, mirroring parse()'s cascade. Defined
+" last (like heraldShowNow) with no `contains`, so it greys everything inside and wins on overlap.
+syntax region heraldSleep keepend start=/^\z(\t*\)?/ end=/^\%(\z1\t\)\@!/me=s-1
+
 highlight default link heraldComment      Comment
 highlight default link heraldHeader       Identifier
 highlight default link heraldWorktree     Identifier
@@ -108,5 +115,8 @@ highlight default heraldWidgetOutput guifg=#ffffff guibg=#333333 ctermfg=15 cter
 " HERALD directives: white on violet (#8b5cf6), matching the tui/Sublime setup; a meta-command
 " that edits the .herald files themselves. `default` so a colorscheme can override.
 highlight default heraldDirective guifg=#ffffff guibg=#8b5cf6 ctermfg=15 ctermbg=99
+" Slept `?` scopes: muted grey (#666666), matching the tui/Sublime setup; `default` so a
+" colorscheme can override.
+highlight default heraldSleep guifg=#666666 ctermfg=242
 
 let b:current_syntax = 'herald'

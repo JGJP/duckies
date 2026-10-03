@@ -278,6 +278,7 @@ const C = {
 	marker: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (invalid.illegal.marker — [NO DIR …])
 	shownow: fgbg(0, 0, 0, 255, 255, 255), // black on #ffffff (markup.other.shownow)
 	clear: fgbg(0, 0, 0, 255, 230, 0), // black on #ffe600 (markup.other.clear)
+	sleep: fg(102, 102, 102), // #666666 muted grey (markup.other.sleep) — a slept `?` scope reads as dimmed
 	gutter: '\x1b[38;5;240m',
 	gutterCur: '\x1b[38;5;250m',
 	status: '\x1b[7m',
@@ -296,6 +297,27 @@ function isWidgetOutput(row: number): boolean {
 
 // Per-character color for one line (null = default). Category order follows the grammar. `row`
 // is the buffer index, needed to tell a widget's `| ` output from an ordinary prompt body.
+// Whether buffer row `row` sits inside a slept (`?`-prefixed) scope — the `?` header/worktree
+// label itself, or any line nested under it. Walks up the indent nesting from `row`: each strictly
+// shallower ancestor is checked, a `?` on the row or any ancestor means slept, and a column-0
+// non-`?` ancestor ends the search. Mirrors parse()'s cascade (a `?` scope sleeps its worktrees).
+function sleptScope(row: number): boolean {
+	const indentOf = (s: string) => s.match(/^\t*/)![0].length
+	const isSleep = (s: string) => s.replace(/^\t*/, '').startsWith('?')
+	if (isSleep(lines[row])) return true
+	let ind = indentOf(lines[row])
+	for (let r = row - 1; r >= 0; r--) {
+		if (lines[r].trim() === '') continue
+		const ri = indentOf(lines[r])
+		if (ri < ind) {
+			if (isSleep(lines[r])) return true
+			ind = ri
+			if (ri === 0) return false
+		}
+	}
+	return false
+}
+
 function colorsFor(line: string, row: number): (string | null)[] {
 	const n = line.length
 	const col: (string | null)[] = new Array(n).fill(null)
@@ -303,6 +325,12 @@ function colorsFor(line: string, row: number): (string | null)[] {
 		for (let i = a; i < Math.min(b, n); i++) col[i] = c
 	}
 	if (n === 0) return col
+	// A slept `?` scope greys out entirely — the header/label line and every line nested under it —
+	// so a dormant scope reads as inactive. Checked first so it overrides the per-item coloring.
+	if (sleptScope(row)) {
+		fill(0, n, C.sleep)
+		return col
+	}
 	const lead = line.match(/^\t+[ ]*/)?.[0].length ?? 0
 	// A `|` line is a multiline prompt-body continuation (YAML block-scalar style): the `|`
 	// reads as a sigil, the rest as prompt text — so a pasted body never looks like a worktree.

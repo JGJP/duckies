@@ -9,6 +9,12 @@
 			"name": "markup.other.shownow.herald"
 		},
 		{
+			"comment": "Sleep scope: a header or worktree label whose first non-tab char is `?` is slept (herald tears its tmux down but keeps the conversation). Greys the WHOLE scope — the `?` line and every line indented deeper than it — so the dormant block reads as inactive. `\\1` captures the `?` line's indent; the region ends at the first line not indented past it (the next sibling/header), mirroring parse()'s cascade. Matched before the item/label rules; no sigil item starts with `?`.",
+			"begin": "^(\\t*)\\?.*$",
+			"end": "^(?!\\1\\t)",
+			"name": "markup.other.sleep.herald"
+		},
+		{
 			"comment": "Comment: any row starting with `#` (at any indent, incl. column 0) is ignored.",
 			"match": "^\\s*((#)[^\\n]*)$",
 			"captures": {

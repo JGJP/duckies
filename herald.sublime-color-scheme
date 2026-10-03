@@ -64,6 +64,11 @@
 			"background": "#ffe600",
 		},
 		{
+			// A slept `?` scope — greyed out so a dormant header/worktree reads as inactive.
+			"scope": "markup.other.sleep.herald",
+			"foreground": "#666666",
+		},
+		{
 			"scope": "markup.other.directive.herald",
 			"foreground": "#ffffff",
 			"background": "#8b5cf6",
