@@ -1268,6 +1268,9 @@ interface RtEntry {
 	// so a prompt added after a system restart reopens the prior conversation. Following a `/resume`
 	// is automatic: the next hook carries the new id and overwrites the entry.
 	conv?: Record<number, string>
+	// Set while the session is slept (`?`). Lets wake respawn it even when its queue is fully
+	// drained (no pending work would otherwise spawn nothing); cleared by the spawn-reset on wake.
+	parked?: boolean
 	// Per-widget refresh gate, keyed `name#occurrence` within this label: when it last ran, so a
 	// widget only reruns once its `interval` has elapsed (survives restarts via controller.json).
 	widgets?: Record<string, { lastRun: number }>
@@ -1317,6 +1320,12 @@ function readStateFile(p: string): StateEvent | null {
 	}
 }
 const readState = (label: string, n: number): StateEvent | null => readStateFile(statePath(label, n))
+// The conversation id to `--resume` for lane `n` of `label`: the tracked one (rt.conv), else the
+// `session_id` the hook last wrote to the lane's state file. The fallback recovers resume for a
+// session whose id was never tracked in rt — one that last ran under a build predating conv
+// tracking, or whose rt entry was dropped — since the hook records session_id regardless. Undefined
+// when neither is known (then the (re)launch starts a fresh conversation).
+const resumeIdFor = (rt: Rt, label: string, n: number): string | undefined => rt[label]?.conv?.[n] ?? readState(label, n)?.sessionId ?? undefined
 // The newest assistant message's full text from the transcript the hook payload at `path` points
 // to (follow `raw.transcript_path`, take the last `assistant` entry, join its text parts). Null when
 // the payload/transcript is unreadable or has no assistant message. The source for both the `-> `
@@ -2728,14 +2737,14 @@ async function tick(rt: Rt) {
 		if (RESERVED.has(label)) continue
 		const dir = s.dir
 		if (s.sleep) {
-			// `?`-prefixed scope (sleep): keep it torn down but preserve its tracked conversation
-			// ids, so removing the `?` later wakes it and --resumes. Kill the live tmux session once
-			// and drop its state files, but keep rt[label] (its `conv` map) and never respawn while
-			// asleep. A worktree's dir is left on disk, so a wake reopens it in place.
-			if (live.has(label)) {
-				actions.push(() => doKill(label, survivor))
-				rmAllDoneFiles(label)
-			}
+			// `?`-prefixed scope (sleep): keep it torn down but remember it's `parked` and keep both
+			// its tracked conversation ids (rt[label].conv) and its state files, so removing the `?`
+			// later wakes it and --resumes — even if its queue is fully drained. Kill the live tmux
+			// session once; never respawn while asleep. A worktree's dir is left on disk, so a wake
+			// reopens it in place. (State files are kept, not swept, so resumeIdFor's fallback works.)
+			if (live.has(label)) actions.push(() => doKill(label, survivor))
+			const e = (rt[label] ??= { starting: false, startedAt: 0, lanes: {} })
+			e.parked = true
 			continue
 		}
 		if (!existsSync(dir)) {
@@ -2743,7 +2752,7 @@ async function tick(rt: Rt) {
 			// work (like any spawn). A git base is worktree'd; a non-git base is symlinked so the
 			// session works directly on its files (see linkDirAndSpawn).
 			if (s.worktreeBase) {
-				if (!hasPendingInput(s) && !s.showNow) continue
+				if (!hasPendingInput(s) && !s.showNow && !rt[label]?.parked) continue
 				const base = s.worktreeBase
 				if (!existsSync(base)) {
 					// Nothing to worktree or link to. Log once, then leave the marker (re-stamping the
@@ -2756,7 +2765,7 @@ async function tick(rt: Rt) {
 				s.desiredSession = null // clear any stale marker before creating
 				const conv = rt[label]?.conv // preserve tracked conversation ids across the reset
 				rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, worktreeDir: dir, worktreeBase: base, conv }
-				const resumeId = conv?.[1]
+				const resumeId = resumeIdFor(rt, label, 1)
 				if (existsSync(join(base, '.git'))) {
 					const cfg = { cmd: s.worktreeCmd, copy: s.worktreeCopy }
 					actions.push(() => addWorktreeAndSpawn(label, base, dir, cfg, resumeId))
@@ -2770,11 +2779,13 @@ async function tick(rt: Rt) {
 			// Only spawn once there's something to feed the session; a bare header
 			// (or a fully drained one) gets no tmux session until work appears. A
 			// pending `show`, or a `!` "show now" header, also counts — you can't
-			// switch to a session that isn't there yet — so it spawns first.
-			if (!hasPendingInput(s) && !s.showNow) continue
+			// switch to a session that isn't there yet — so it spawns first. A `parked`
+			// session (one just woken from `?` sleep) also respawns, even when drained,
+			// so removing the `?` brings it back and --resumes its conversation.
+			if (!hasPendingInput(s) && !s.showNow && !rt[label]?.parked) continue
 			const conv = rt[label]?.conv // preserve tracked conversation ids across the reset
 			rt[label] = { starting: true, startedAt: Date.now(), lanes: {}, conv }
-			actions.push(() => doSpawn(label, dir, conv?.[1]))
+			actions.push(() => doSpawn(label, dir, resumeIdFor(rt, label, 1)))
 			continue
 		}
 		// `!` "show now" reveals (header and per-item) fired up front in the reveal pass, so
@@ -2831,7 +2842,7 @@ async function tick(rt: Rt) {
 					resetLaneFrontier(s, n, lr) // its prior turn died with the restore; run it again
 					lr.starting = true
 					lr.startedAt = Date.now()
-					actions.push(() => repairClaude(label, dir, n, re.conv?.[n]))
+					actions.push(() => repairClaude(label, dir, n, resumeIdFor(rt, label, n)))
 					continue
 				}
 				if (lr.starting && Date.now() - lr.startedAt < READY_MS) continue // let claude<N> boot
