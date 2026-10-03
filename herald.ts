@@ -34,6 +34,12 @@ const ALIASES_FILE = process.env.HERALD_ALIASES ? resolve(process.env.HERALD_ALI
 const STATE = join(HERE, 'state')
 const RT_PATH = join(STATE, 'controller.json')
 const LOCK = join(STATE, 'supervisor.lock')
+// Self-restart sentinel: when this file appears, the loop consumes it and exits with RESTART_EXIT.
+// `nr start` runs under herald-run.ts, which relaunches on that code — so `tsx` re-reads the
+// (edited) source and the supervisor comes back on new code, in the same terminal, without a manual
+// restart. `nr restart` writes the sentinel (see herald-restart.ts); nothing new is ever spawned.
+const RESTART_FILE = join(STATE, 'restart')
+const RESTART_EXIT = 97
 // Where a bare session name (not a path or alias) resolves: `<DEV_DIR>/<name>`.
 // `HERALD_DEV_DIR` overrides it; defaults to `~/_dev`.
 const DEV_DIR = process.env.HERALD_DEV_DIR ? resolve(process.env.HERALD_DEV_DIR) : join(homedir(), '_dev')
@@ -3183,6 +3189,16 @@ if (isMain)
 				}, WATCH_MS)
 			})
 		while (true) {
+			// A pending restart request (state/restart) is consumed here and the process exits with
+			// RESTART_EXIT, which the `nr start` wrapper (herald-run.ts) relaunches on — picking up any
+			// edited source. tmux sessions are left running, so the fresh instance just reconciles them.
+			if (existsSync(RESTART_FILE)) {
+				try {
+					unlinkSync(RESTART_FILE)
+				} catch {}
+				log('restart requested — exiting for the wrapper to relaunch on current source')
+				process.exit(RESTART_EXIT)
+			}
 			await tick(rt)
 			await new Promise<void>((resolve) => {
 				if (dirtyBetweenTicks) {

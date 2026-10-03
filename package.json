@@ -27,7 +27,8 @@
 	},
 	"packageManager": "pnpm@11.8.0",
 	"scripts": {
-		"start": "tsx herald.ts",
+		"start": "tsx herald-run.ts",
+		"restart": "tsc --noEmit && tsx herald-restart.ts",
 		"herald": "tsx tui.ts",
 		"dry-run": "tsx herald.ts --dry-run",
 		"setup": "tsx setup.ts",
