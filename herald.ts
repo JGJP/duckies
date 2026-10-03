@@ -46,7 +46,7 @@ const AGENT_CMD = process.env.HERALD_AGENT_CMD || 'claude'
 // prompt`, because that flag can't coexist with the `--append-system-prompt-file` a wrapping
 // `claude` may already pass — and repeated `-file` flags are last-wins, not merged.
 const NOTE_PROMPT =
-	'When you finish responding to a prompt in this session, end your final message with a single line beginning with -> that gives a terse summary of what you did: aim for about 3-6 words, plain text (no backticks, code, or long paths — a bare filename is fine). E.g. "-> Updated watch-pr-comments.md".'
+	'When you finish responding to a prompt in this session, end your final message with a single line beginning with -> that states the actual useful outcome of the turn — the concrete result, or, when you were asked a question, the answer itself (NOT a description of what you did). Keep it terse (roughly 3-12 words) and plain text (no backticks, code, or long paths — a bare filename is fine). Good: "-> yes, all 3 CI checks are green"; "-> added /healthz + a passing test"; "-> the leak is in cacheWarm(), not the router". Bad (meta, omits the answer): "-> answered the question"; "-> investigated the issue".'
 // A base system-prompt file to fold in, so a `--append-system-prompt-file` already on the
 // launch (e.g. a personal prompt added by a shell `claude` wrapper) isn't lost to last-wins:
 // herald's file must be a superset. Defaults to the common fish-wrapper path; override or set
