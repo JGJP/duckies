@@ -86,14 +86,16 @@ function launchCmd(resumeId?: string): string {
 // the agent dir (its CLAUDE.md explains the `.herald` format), with the control dir added so it can
 // edit the files — to act on the `.herald` file(s) themselves (e.g. "remove every idle lane here").
 // Unlike a normal prompt it never joins the queue; it runs in its own visible tmux window inside a
-// dedicated `__herald-agent` session (revealable with `!HERALD:`). `HERALD_AGENT_DIR` overrides the
-// cwd/CLAUDE.md dir; `HERALD_AGENT_PERMISSION_MODE` the permission mode (default bypassPermissions —
-// the run can't answer prompts); `HERALD_AGENT_MODEL` an optional model; `HERALD_AGENT_TIMEOUT_MS`
-// when a stuck run is given up on.
+// dedicated `__herald-agent` session (revealable with `!HERALD:`). After it finishes the directive
+// its window is KEPT ALIVE as a live conversation you can keep prompting; it's only torn down once
+// idle (no hook activity) for `HERALD_AGENT_IDLE_MS` — a fresh prompt in the window resets that.
+// `HERALD_AGENT_DIR` overrides the cwd/CLAUDE.md dir; `HERALD_AGENT_PERMISSION_MODE` the permission
+// mode (default bypassPermissions — the run can't answer prompts); `HERALD_AGENT_MODEL` an optional model.
 const AGENT_DIR = process.env.HERALD_AGENT_DIR ? resolve(process.env.HERALD_AGENT_DIR) : join(HERE, 'agent')
 const HERALD_AGENT_PERM = process.env.HERALD_AGENT_PERMISSION_MODE || 'bypassPermissions'
 const HERALD_AGENT_MODEL = process.env.HERALD_AGENT_MODEL || ''
-const HERALD_AGENT_TIMEOUT_MS = Number(process.env.HERALD_AGENT_TIMEOUT_MS) || 15 * 60 * 1000
+// How long a HERALD agent window may sit idle (no Stop/prompt hook activity) before it's torn down.
+const HERALD_AGENT_IDLE_MS = Number(process.env.HERALD_AGENT_IDLE_MS) || 60 * 60 * 1000
 // The dedicated tmux session (`__herald-agent`) that holds one window per in-flight HERALD agent.
 // Reserved (below) so herald's reaper never kills it; it disappears on its own once its last agent
 // window is torn down. Kept out of `~/_dev` name-resolution — it's never a real `.herald` session.
@@ -2918,13 +2920,14 @@ async function tick(rt: Rt) {
 	}
 
 	// ---- herald pass: drive a visible `claude` window for each `HERALD:` directive ----
-	// A `HERALD:` directive runs a real claude in its own window in the `__herald-agent` session. It's
-	// a one-shot with a small lifecycle (recorded per key in rt): spawn the window → after the boot
-	// grace, type the directive → poll the agent's Stop hook → mirror its `-> ` summary below the
-	// directive and tear the window down. That note is the durable done-marker (delete it to re-run);
-	// a directive that already has a note is skipped. A `!HERALD:` reveals the window once it's up.
-	// Spawn/prompt/reveal/teardown are queued as `actions` so they run past the mid-tick defer; the
-	// note flows through buildOps below (same defer). Keyed like widgets (hash + occurrence).
+	// A `HERALD:` directive runs a real claude in its own window in the `__herald-agent` session.
+	// Lifecycle (recorded per key in rt): spawn the window → after the boot grace, type the directive
+	// → poll the agent's Stop hook → mirror its `-> ` summary below the directive (the durable
+	// done-marker; delete it to re-run). The window is then KEPT ALIVE as a live conversation — you
+	// can keep prompting it — and torn down only once it's sat idle (no Stop/prompt hook activity) for
+	// HERALD_AGENT_IDLE_MS; a fresh prompt bumps the state-file mtime and so resets that timer. A
+	// `!HERALD:` reveals the window once it's up. Spawn/prompt/reveal/teardown are queued as `actions`
+	// so they run past the mid-tick defer; the note/marker flow through buildHeraldOps (same defer).
 	if (!DRY) {
 		const now = Date.now()
 		const seen = new Map<string, Map<string, number>>() // label → (directive → occurrence)
@@ -2937,40 +2940,61 @@ async function tick(rt: Rt) {
 			for (const item of [...c.sessions.flatMap((s) => s.heralds), ...c.heralds]) {
 				{
 					if (!item.label) item.label = fileLabel
-					if (item.note) continue // already ran — a `-> ` note sits below it
-					// In progress until proven otherwise: the marker below reflects this, and the two
-					// terminal branches (timeout, finished) clear it as they write the `-> ` note.
-					item.desiredKind = 'EXECUTING'
+					// Occurrence key is computed for EVERY directive (noted or not) so a directive keeps
+					// the same key across the transition to "noted" — its lingering window's rt entry
+					// still matches.
 					const perLabel = seen.get(item.label) ?? new Map<string, number>()
 					seen.set(item.label, perLabel)
 					const occ = perLabel.get(item.directive) ?? 0
 					perLabel.set(item.directive, occ + 1)
 					const key = `${heraldHash(item.directive)}-${occ}`
+					const entry = rt[item.label]?.heralds?.[key]
+					// Noted (done) AND no live window left ⇒ fully finished; nothing to do. (A noted
+					// directive whose window still lingers falls through to the idle-teardown below.)
+					if (!entry && item.note) continue
 					liveKeys.add(`${item.label}\0${key}`)
-					const entry = (rt[item.label] ??= { starting: true, startedAt: 0, lanes: {} })
-					entry.heralds ??= {}
-					const rec = entry.heralds[key]
 					// All rt mutations live inside actions, which run only past the mid-tick defer — so a
 					// deferred tick leaves rt untouched and the phase simply retries next tick (no double-
 					// spawn, no phantom "sent"). Teardown deletes the record and kills the window together.
-					const teardown = () => actions.push(async () => (await teardownHeraldAgent(item.label, key), void delete entry.heralds![key]))
-					if (!rec) {
-						// First sighting: create the window + launch claude. The directive is typed in a
-						// later tick (once booted), so the file path is captured now for that step.
-						actions.push(async () => (entry.heralds![key] = { startedAt: Date.now(), sentAt: 0 }, void (await spawnHeraldAgent(item, key))))
-					} else if (rec.sentAt === 0) {
+					const teardown = () => actions.push(async () => (await teardownHeraldAgent(item.label, key), void delete rt[item.label]?.heralds?.[key]))
+					if (!entry) {
+						// First sighting: create the window + launch claude (rt set in the action, past the
+						// defer). The directive is typed in a later tick, once claude has booted.
+						item.desiredKind = 'EXECUTING'
+						const e = (rt[item.label] ??= { starting: true, startedAt: 0, lanes: {} })
+						e.heralds ??= {}
+						actions.push(async () => (e.heralds![key] = { startedAt: Date.now(), sentAt: 0 }, void (await spawnHeraldAgent(item, key))))
+					} else if (entry.sentAt === 0) {
 						// Window up, claude booting: type the directive once the boot grace has passed.
-						if (now - rec.startedAt >= READY_MS) actions.push(async () => ((rec.sentAt = Date.now()), void (await sendHeraldDirective(item, key, c.path))))
-					} else if (now - rec.startedAt > HERALD_AGENT_TIMEOUT_MS) {
-						// Stuck run: give up so it can't wedge forever.
-						item.desiredNote = 'herald agent timed out'
-						item.desiredKind = null
-						teardown()
-					} else if (isTurnEnd(readStateFile(heraldFile(item.label, key, 'json')), rec.sentAt) && !(await heraldAgentBusy(key))) {
-						// The agent finished: mirror its `-> ` summary (fallback so it isn't re-run), tear down.
-						item.desiredNote = noteFromState(heraldFile(item.label, key, 'json')) ?? 'herald agent finished'
-						item.desiredKind = null
-						teardown()
+						item.desiredKind = 'EXECUTING'
+						if (now - entry.startedAt >= READY_MS) actions.push(async () => ((entry.sentAt = Date.now()), void (await sendHeraldDirective(item, key, c.path))))
+					} else {
+						// Directive sent. `lastActivity` is the agent's state-file mtime (bumped by every
+						// Stop/prompt hook) — the inactivity clock; `pane`/`busy` read the live window.
+						const st = readStateFile(heraldFile(item.label, key, 'json'))
+						const lastActivity = st?.mtimeMs ?? entry.startedAt
+						const pane = await heraldAgentPane(key)
+						const busy = pane !== null && (await heraldAgentBusy(key))
+						const idleGone = pane === null || (now - lastActivity > HERALD_AGENT_IDLE_MS && !busy)
+						if (!item.note) {
+							item.desiredKind = 'EXECUTING'
+							if (pane !== null && isTurnEnd(st, entry.sentAt) && !busy) {
+								// First turn finished: mirror the `-> ` summary (fallback so it isn't re-run) and
+								// drop the marker. The window is KEPT ALIVE — not torn down — so you can keep
+								// prompting it; the idle check below reaps it once it's been quiet long enough.
+								item.desiredNote = noteFromState(heraldFile(item.label, key, 'json')) ?? 'herald agent finished'
+								item.desiredKind = null
+							} else if (idleGone) {
+								// Window closed, or went idle for the TTL before ever finishing → give up, recording
+								// a note so the directive isn't relaunched (a stuck *busy* pane is left alone).
+								item.desiredNote = pane === null ? 'herald agent window closed' : 'herald agent timed out'
+								item.desiredKind = null
+								teardown()
+							}
+						} else if (idleGone) {
+							// Done (noted); its lingering window has closed or gone idle for the TTL → tear down.
+							teardown()
+						}
 					}
 					// A `!HERALD:` reveals the agent window once it exists; consumed (strip `!`) when revealed.
 					if (item.showNow && !item.showNowFired) {

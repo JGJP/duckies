@@ -731,7 +731,7 @@ When herald sees a new `HERALD:` line it spawns a **visible tmux window** runnin
 tmux session (one window per running directive); the agent's cwd is a dedicated **agent directory**
 whose `CLAUDE.md` explains the `.herald` format and the task contract, with the control dir added so
 it can edit the files. It does the edit, then herald mirrors its `-> ` summary just below the
-directive — exactly like a finished prompt — and tears the window down:
+directive — exactly like a finished prompt:
 
 ```
 	HERALD: remove every idle lane here
@@ -747,6 +747,11 @@ HERALD: move this worktree to a new file this-worktree.herald
 HERALD: remove every idle lane here
 HERALD: remove low-importance commands and prompts here that are already processed
 ```
+
+**The window stays open.** After the directive finishes, its `__herald-agent` window is **kept
+alive as a live conversation** — switch to it (`!HERALD:`, below) and keep prompting the same agent.
+It's torn down only once it's sat **idle for an hour** (`HERALD_AGENT_IDLE_MS`); any new prompt in
+the window resets that timer. Deleting the `HERALD:` line also tears its window down at once.
 
 Prefix a **`!`** (`!HERALD: …`) to **switch to the agent's window** as soon as it's up, so you can
 watch it work — the eager cousin of a queued reveal. The `!` is consumed (stripped) once it fires.
@@ -790,7 +795,8 @@ Notes:
 - `HERALD_AGENT_PERMISSION_MODE` — the `HERALD:` agent's `--permission-mode`; default
   `bypassPermissions` (it can't stop to answer approval prompts).
 - `HERALD_AGENT_MODEL` — optional `--model` for the `HERALD:` agent; default: the CLI's own default.
-- `HERALD_AGENT_TIMEOUT_MS` — when a stuck `HERALD:` agent is given up on (default 900000 = 15m).
+- `HERALD_AGENT_IDLE_MS` — how long a finished `HERALD:` agent window is kept alive before it's torn
+  down for inactivity; any new prompt in it resets the timer (default 3600000 = 1h).
 - `HERALD_TERM_APP` — macOS only, opt-in: the terminal app to bring to the foreground on a
   `show`/`!` (e.g. `WezTerm`, `iTerm`, `Terminal`). Unset ⇒ no app foregrounding (the tmux
   client still switches). Ignored off macOS.
