@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-// `pnpm herald [file.herald]` — a self-contained, vim-like modal editor for `.herald`
+// `pnpm duckies [file.dk]` — a self-contained, vim-like modal editor for `.dk`
 // control files. It owns the terminal directly (raw mode + ANSI on the alternate
 // screen); there is no external editor process. While you edit, the supervisor keeps
 // writing to the same file (marker updates, drained lines); a background poll folds
@@ -18,22 +18,21 @@ import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileS
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { diff3Merge } from 'node-diff3'
-import { CONTROL_DIR, controlFiles, loadAliases, loadMacros, loadWidgets, parse } from './herald'
+import { CONTROL_DIR, controlFiles, loadAliases, loadMacros, loadWidgets, parse } from './duckies'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
 // `--session <label>` runs a compiled session view: instead of one file, the buffer is this
-// label's `.herald` blocks merged across every control file (see compileSession), live-synced
-// and written back per source file. This is what herald opens as window 0 of each session.
+// label's `.dk` blocks merged across every control file (see compileSession), live-synced
+// and written back per source file. This is what duckies opens as window 0 of each session.
 const sessionIdx = process.argv.indexOf('--session')
 const SESSION_LABEL = sessionIdx >= 0 ? (process.argv[sessionIdx + 1] ?? null) : null
-// Which file to edit: an explicit `pnpm herald <file>` arg (a bare name is looked up
-// in the repo dir), else HERALD_FILE, else the default `.herald`. Unused in session mode.
+// Which file to edit: an explicit `pnpm duckies <file>` arg (a bare name is looked up
+// in the control dir), else DUCKIES_FILE, else the default `.dk`. Unused in session mode.
 const argFile = SESSION_LABEL ? undefined : process.argv[2]
 const FILE = argFile
-	? resolve(argFile.includes('/') ? argFile : join(HERE, argFile))
-	: process.env.HERALD_FILE
-		? resolve(process.env.HERALD_FILE)
-		: join(HERE, '.herald')
+	? resolve(argFile.includes('/') ? argFile : join(CONTROL_DIR, argFile))
+	: process.env.DUCKIES_FILE
+		? resolve(process.env.DUCKIES_FILE)
+		: join(CONTROL_DIR, '.dk')
 const POLL_MS = 300
 const TAB = 4 // display width of a tab (buffer keeps the real \t)
 
@@ -79,15 +78,15 @@ export function nearestIndex(lines: string[], value: string, near: number): numb
 
 // ── compiled session view (multi-file merge + write-back) ─────────────────────
 // A control file's current content, as buffer lines.
-export interface HeraldFile {
+export interface DuckiesFile {
 	path: string
 	lines: string[]
 }
 const ALIASES = loadAliases()
 const MACROS = loadMacros()
 const WIDGETS = loadWidgets()
-// Read every control file herald manages (the same set, resolved from the same env).
-const readControlFiles = (): HeraldFile[] =>
+// Read every control file duckies manages (the same set, resolved from the same env).
+const readControlFiles = (): DuckiesFile[] =>
 	controlFiles()
 		.map((path) => {
 			try {
@@ -96,12 +95,12 @@ const readControlFiles = (): HeraldFile[] =>
 				return null
 			}
 		})
-		.filter((f): f is HeraldFile => f !== null)
+		.filter((f): f is DuckiesFile => f !== null)
 
 // The top-level session blocks (column-0 header .. last child line) for `label`, across the
-// given files in order. Uses herald's own parse(), so the slice matches the supervisor's model
+// given files in order. Uses duckies's own parse(), so the slice matches the supervisor's model
 // exactly. A worktree label has no such block — see viewParts.
-export function viewBlocks(files: HeraldFile[], label: string): { path: string; start: number; end: number }[] {
+export function viewBlocks(files: DuckiesFile[], label: string): { path: string; start: number; end: number }[] {
 	const out: { path: string; start: number; end: number }[] = []
 	for (const f of files) {
 		const { sessions } = parse(f.lines.join('\n'), ALIASES, MACROS, WIDGETS)
@@ -127,7 +126,7 @@ export interface ViewPart {
 // The blocks that make up `label`'s view. A top-level label → its own blocks (header null). A
 // worktree label (no column-0 header of its own) → each occurrence's indented block, tagged with
 // its enclosing repo header for context. A label is one kind or the other, never both.
-export function viewParts(files: HeraldFile[], label: string): ViewPart[] {
+export function viewParts(files: DuckiesFile[], label: string): ViewPart[] {
 	const top: ViewPart[] = []
 	const wt: ViewPart[] = []
 	for (const f of files) {
@@ -151,7 +150,7 @@ export function viewParts(files: HeraldFile[], label: string): ViewPart[] {
 // block, so planSessionWriteback can split them back apart without the headers). A worktree view
 // keeps its parent repo header as context, then the worktree block verbatim. Either way in-block
 // comments, barriers, notes and status markers all carry through.
-export function compileSession(files: HeraldFile[], label: string): string[] {
+export function compileSession(files: DuckiesFile[], label: string): string[] {
 	const view: string[] = []
 	viewParts(files, label).forEach((p, idx) => {
 		const f = files.find((x) => x.path === p.path)!
@@ -171,7 +170,7 @@ export function compileSession(files: HeraldFile[], label: string): string[] {
 // compileSession). Each blank-separated run is one block, re-indented one tab, with its header
 // taken from the matching disk part — a surplus block the user added gets the label as its header,
 // matching a fresh `<label>` block.
-function reindentTopLevel(buffer: string[], parts: ViewPart[], files: HeraldFile[], label: string): string[] {
+function reindentTopLevel(buffer: string[], parts: ViewPart[], files: DuckiesFile[], label: string): string[] {
 	const blocks: string[][] = []
 	let cur: string[] = []
 	for (const l of buffer) {
@@ -205,11 +204,11 @@ function bufferBlocks(buffer: string[]): string[][] {
 // Reconcile an edited session buffer back into the source files. Each buffer block is paired in
 // order with the disk block it was compiled from and replaces it in place; a surplus buffer
 // block is appended to the primary file (the first that holds this label, else a new
-// `<label>.herald`); a surplus disk block (the user deleted one) is removed. In a worktree view
+// `<label>.dk`); a surplus disk block (the user deleted one) is removed. In a worktree view
 // each buffer block is `[contextHeader, ...body]` — the header is dropped and only the body is
 // written to the worktree's own range. Returns only the files whose content changed. Pure, so
 // it's unit-testable.
-export function planSessionWriteback(files: HeraldFile[], label: string, buffer: string[], primaryDir: string): HeraldFile[] {
+export function planSessionWriteback(files: DuckiesFile[], label: string, buffer: string[], primaryDir: string): DuckiesFile[] {
 	const parts = viewParts(files, label)
 	// In a worktree view every compiled block is prefixed with a context header; strip it back
 	// off so the body maps to the worktree's own on-disk range. A top-level view is header-less and
@@ -235,7 +234,7 @@ export function planSessionWriteback(files: HeraldFile[], label: string, buffer:
 		}
 	}
 	if (bodies.length > parts.length) {
-		const primaryPath = parts[0]?.path ?? join(primaryDir, `${label}.herald`)
+		const primaryPath = parts[0]?.path ?? join(primaryDir, `${label}.dk`)
 		if (!next.has(primaryPath)) next.set(primaryPath, [])
 		const lines = next.get(primaryPath)!
 		for (let i = parts.length; i < bodies.length; i++) {
@@ -243,7 +242,7 @@ export function planSessionWriteback(files: HeraldFile[], label: string, buffer:
 			lines.push(...bodies[i])
 		}
 	}
-	const out: HeraldFile[] = []
+	const out: DuckiesFile[] = []
 	for (const [p, lines] of next) {
 		const orig = files.find((f) => f.path === p)?.lines
 		if (!orig || !eq(orig, lines)) out.push({ path: p, lines })
@@ -251,8 +250,8 @@ export function planSessionWriteback(files: HeraldFile[], label: string, buffer:
 	return out
 }
 
-// ── syntax highlighting (mirrors parse() / herald.sublime-syntax) ─────────────
-// Truecolor ANSI matching herald.sublime-color-scheme exactly (same hexes, same fg/bg per
+// ── syntax highlighting (mirrors parse() / duckies.sublime-syntax) ─────────────
+// Truecolor ANSI matching duckies.sublime-color-scheme exactly (same hexes, same fg/bg per
 // scope), so the tui looks like the file does in Sublime. `#` comments and `-> ` notes have no
 // scheme rule (they inherit the editor's comment color), so they use a muted grey here; `show`
 // likewise has no rule (inherits keyword.control), so it keeps a keyword-ish accent.
@@ -268,7 +267,7 @@ const C = {
 	cmdText: fg(51, 153, 255),
 	show: '\x1b[38;5;170m', // keyword-ish accent — no scheme rule to match
 	macro: fg(166, 223, 149), // #a6df95, no background (entity.name.function.macro)
-	directive: fgbg(255, 255, 255, 139, 92, 246), // white on #8b5cf6 (markup.other.directive) — a `HERALD:` line
+	directive: fgbg(255, 255, 255, 139, 92, 246), // white on #8b5cf6 (markup.other.directive) — a `DUCKIES:` line
 	widget: fgbg(255, 255, 255, 51, 51, 51), // white on #333333 — a `&name` display and its `| ` output
 	exec: fgbg(0, 0, 0, 255, 121, 26), // black on #ff791a (constant.language.executing)
 	done: fgbg(255, 255, 255, 220, 4, 4), // white on #dc0404 (markup.inserted.done)
@@ -354,7 +353,7 @@ function colorsFor(line: string, row: number): (string | null)[] {
 		return col
 	}
 	// A leading `!` (at column 0 or right after the indent) is the "show now" mark — the only
-	// form of `!` herald recognises. The whole line reads as one accent, mirroring parse()'s
+	// form of `!` duckies recognises. The whole line reads as one accent, mirroring parse()'s
 	// leading-`!` handling and the grammars in the other editors.
 	if (afterIndent.startsWith('!')) {
 		fill(0, n, C.shownow)
@@ -366,8 +365,8 @@ function colorsFor(line: string, row: number): (string | null)[] {
 	if (/^@[\w-]+(?:\s.*)?$/.test(body)) {
 		// Macro call — a name char must follow the `@` (so a `@@@…` body line stays default).
 		fill(lead, n, C.macro)
-	} else if (body.startsWith('HERALD:')) {
-		// A `HERALD:` directive — a background agent that edits the `.herald` files themselves.
+	} else if (body.startsWith('DUCKIES:')) {
+		// A `DUCKIES:` directive — a background agent that edits the `.dk` files themselves.
 		// Case-sensitive (like parse), matched before the worktree fallback so it isn't read as a
 		// label; painted white-on-violet as a distinct meta-command.
 		fill(lead, n, C.directive)
@@ -391,8 +390,8 @@ function colorsFor(line: string, row: number): (string | null)[] {
 		const c = inner.includes('executing') ? C.exec : inner.includes('done') ? C.done : inner.includes('attention') ? C.attn : inner.includes('error') ? C.error : inner.includes('waiting') ? C.waiting : C.marker
 		fill(lead, lead + m[1].length, c)
 	} else if (body.startsWith('->')) {
-		// A `-> <summary>` note herald mirrored below a finished prompt (see NOTE_RE / the note pass
-		// in herald.ts). Matched before the worktree fallback so it isn't read as a label; painted
+		// A `-> <summary>` note duckies mirrored below a finished prompt (see NOTE_RE / the note pass
+		// in duckies.ts). Matched before the worktree fallback so it isn't read as a label; painted
 		// muted grey so it reads like the `#` comments, matching the three editor grammars.
 		fill(lead, n, C.comment)
 	} else {
@@ -1426,7 +1425,7 @@ function restore() {
 
 function main() {
 	if (!process.stdin.isTTY) {
-		console.error('herald tui needs an interactive terminal')
+		console.error('duckies tui needs an interactive terminal')
 		process.exit(1)
 	}
 	if (SESSION_LABEL) {
@@ -1435,16 +1434,16 @@ function main() {
 		newFile = false
 	} else {
 		if (!existsSync(FILE)) {
-			// With no explicit arg the default is `.herald`; if that's absent but other
-			// `*.herald` files exist, point the user at them rather than opening a stray
-			// empty `.herald`. An explicitly named missing file opens as a new buffer.
+			// With no explicit arg the default is `.dk`; if that's absent but other
+			// `*.dk` files exist, point the user at them rather than opening a stray
+			// empty `.dk`. An explicitly named missing file opens as a new buffer.
 			if (!argFile) {
 				let siblings: string[] = []
 				try {
-					siblings = readdirSync(dirname(FILE)).filter((f) => f.endsWith('.herald') && f !== '.herald').sort()
+					siblings = readdirSync(dirname(FILE)).filter((f) => f.endsWith('.dk') && f !== '.dk').sort()
 				} catch {}
 				if (siblings.length) {
-					console.error(`no .herald file here. edit one of these instead:\n${siblings.map((s) => `  pnpm herald ${s}`).join('\n')}`)
+					console.error(`no .dk file here. edit one of these instead:\n${siblings.map((s) => `  pnpm duckies ${s}`).join('\n')}`)
 					process.exit(1)
 				}
 			}

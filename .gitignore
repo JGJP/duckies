@@ -1,10 +1,7 @@
 node_modules
 state
-herald-control
-*.herald
-herald-actions
-herald-aliases.yaml
-herald-macros.yaml
-herald-widgets.yaml
+duckies-control
+*.dk
+duckies-actions
 .backup/
 .codemap/

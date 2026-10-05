@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildHeraldOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './herald'
+import { aliasWorktree, applyOps, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './duckies'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
+import { appendLabel, colorizeLog } from './duckies-menu'
 
 let failures = 0
 const check = (name: string, cond: boolean, detail?: string) => {
@@ -8,7 +9,7 @@ const check = (name: string, cond: boolean, detail?: string) => {
 	if (!cond) failures++
 }
 
-// A self-contained sessions-only layout (independent of the live herald file's
+// A self-contained sessions-only layout (independent of the live duckies file's
 // current contents). The whole file is sessions now. Tabs are significant.
 const example = [
 	'superapp',
@@ -703,7 +704,7 @@ check(
 )
 
 // macroSteps: a macro body expands to runnable steps in RUN order (bottom-to-top, like every
-// herald queue) — args fill `{0}`/`{1}`/`{*}` (0-based, quote-aware, missing=blank), `#`
+// duckies queue) — args fill `{0}`/`{1}`/`{*}` (0-based, quote-aware, missing=blank), `#`
 // comment and blank lines drop, and `$` lines are commands. Braces (not `$1`) so `{n}` never
 // disturbs a `$2` lane sigil in the body.
 const steps = macroSteps(': review PR {0}, focus on {1}\n# skip me\n\n$ gh pr view {0}\n$2 npm run dev\n', ['2500', 'the auth refactor'])
@@ -1142,7 +1143,7 @@ const wb = parse(withBlanks)
 check('blank-separated sessions both parsed', wb.sessions.length === 2 && wb.sessions.map((s) => s.label).join(',') === 'superapp,superapp-2')
 check('blank lines round-trip byte-identical', applyOps(wb.lines, buildOps(wb.sessions)).join('\n') === withBlanks)
 
-// 8. `pnpm herald` TUI sync helpers. toLines mirrors nvim's buffer representation
+// 8. `pnpm duckies` TUI sync helpers. toLines mirrors nvim's buffer representation
 // (a trailing newline is the eol marker, not an extra empty line).
 check('toLines drops the trailing-newline eol', JSON.stringify(toLines('a\nb\n')) === JSON.stringify(['a', 'b']))
 check('toLines keeps a missing final newline as a real last line', JSON.stringify(toLines('a\nb')) === JSON.stringify(['a', 'b']))
@@ -1310,8 +1311,8 @@ check(
 
 // ── compiled session view (tui.ts --session) ───────────────────────────────────
 {
-	const A = { path: '/tmp/a.herald', lines: ['ztest', '\t: do A', '\t\t[DONE]', '', 'other', '\t: unrelated'] }
-	const B = { path: '/tmp/b.herald', lines: ['ztest', '\t: do B', '\t\t[EXECUTING]'] }
+	const A = { path: '/tmp/a.dk', lines: ['ztest', '\t: do A', '\t\t[DONE]', '', 'other', '\t: unrelated'] }
+	const B = { path: '/tmp/b.dk', lines: ['ztest', '\t: do B', '\t\t[EXECUTING]'] }
 
 	// The view is this label's blocks merged across files, with each block's dir-label header
 	// dropped and its body de-indented one tab; consecutive blocks are blank-separated.
@@ -1345,7 +1346,7 @@ check(
 	check('deleting a view block removes it from its source file', bFile.lines.join('\n') === '')
 
 	// A worktree label has no top-level block of its own …
-	const W = { path: '/tmp/w.herald', lines: ['repo', '\tfeat', '\t\t: work', '\t\t\t[DONE]', '\tother-wt', '\t\t: x'] }
+	const W = { path: '/tmp/w.dk', lines: ['repo', '\tfeat', '\t\t: work', '\t\t\t[DONE]', '\tother-wt', '\t\t: x'] }
 	check('a worktree label has no top-level block of its own', viewBlocks([W], 'repo-feat').length === 0 && viewBlocks([W], 'repo').length === 1)
 
 	// … but its view is compiled with the parent repo header as context, then just the worktree block.
@@ -1469,7 +1470,7 @@ check(
 		'a live footer segment still reports even alongside a stale summary',
 		paneBackgroundRunning('✻ Brewed for 1m 44s · 2 shells still running\n⏵⏵ bypass permissions on · 1 shell · ← for agents'),
 	)
-	// Meta case: a session discussing herald has conversation text quoting `· N shells` up in the
+	// Meta case: a session discussing duckies has conversation text quoting `· N shells` up in the
 	// scrollback. Only the live footer counts, so that quoted text must not report background work.
 	const metaPane = [
 		'⏺ This is the meta-bug. paneBackgroundRunning matched my own text quoting · 2 shells and',
@@ -1485,106 +1486,121 @@ check(
 	check('conversation text quoting `· N shells` does NOT report background (live footer is clean)', !paneBackgroundRunning(metaPane))
 }
 
-// A `HERALD: <directive>` line is collected on the session as a `heralds` item — not a prompt,
-// not a widget — with the directive text stripped of the `HERALD:` sigil and trimmed.
+// A `DUCKIES: <directive>` line is collected on the session as a `duckies` item — not a prompt,
+// not a widget — with the directive text stripped of the `DUCKIES:` sigil and trimmed.
 {
-	const h = parse('moonbase\n\tHERALD: remove every idle lane here\n')
+	const h = parse('moonbase\n\tDUCKIES: remove every idle lane here\n')
 	const s = h.sessions[0]
-	check('a HERALD: line parses into s.heralds, not prompts/widgets', s.heralds.length === 1 && s.prompts.length === 0 && s.widgets.length === 0, JSON.stringify(s.heralds))
-	check('the HERALD directive is the text after the sigil, trimmed', s.heralds[0].directive === 'remove every idle lane here')
-	check('a HERALD directive carries its session label + dir for context', s.heralds[0].label === 'moonbase' && s.heralds[0].dir.endsWith('/moonbase'))
-	// It never enters the queue, so a HERALD-only session has no pending input and won't spawn.
-	check('a HERALD-only session has no pending input (never spawns a pane)', hasPendingInput(s) === false)
+	check('a DUCKIES: line parses into s.duckies, not prompts/widgets', s.duckies.length === 1 && s.prompts.length === 0 && s.widgets.length === 0, JSON.stringify(s.duckies))
+	check('the DUCKIES directive is the text after the sigil, trimmed', s.duckies[0].directive === 'remove every idle lane here')
+	check('a DUCKIES directive carries its session label + dir for context', s.duckies[0].label === 'moonbase' && s.duckies[0].dir.endsWith('/moonbase'))
+	// It never enters the queue, so a DUCKIES-only session has no pending input and won't spawn.
+	check('a DUCKIES-only session has no pending input (never spawns a pane)', hasPendingInput(s) === false)
 
-	// `HERALD:` is case-sensitive — lowercase `herald:` is not a directive (it falls through to the
+	// `DUCKIES:` is case-sensitive — lowercase `duckies:` is not a directive (it falls through to the
 	// worktree/non-sigil case, like any other prose), so it never accidentally triggers an agent.
-	const lower = parse('moonbase\n\therald: not a directive\n')
-	check('lowercase `herald:` is not a HERALD directive', lower.sessions[0].heralds.length === 0)
+	const lower = parse('moonbase\n\tduckies: not a directive\n')
+	check('lowercase `duckies:` is not a DUCKIES directive', lower.sessions[0].duckies.length === 0)
 
 	// A `-> ` note directly below the directive attaches to it (its done-marker), not to a prompt.
-	const done = parse('moonbase\n\t: real prompt\n\t\t[DONE]\n\tHERALD: tidy up here\n\t\t-> removed 2 idle lanes\n')
+	const done = parse('moonbase\n\t: real prompt\n\t\t[DONE]\n\tDUCKIES: tidy up here\n\t\t-> removed 2 idle lanes\n')
 	const ds = done.sessions[0]
-	check('a `-> ` note below a HERALD line attaches to the directive as its done-marker', ds.heralds[0].note?.text === 'removed 2 idle lanes')
-	check('the prompt above keeps its own note, not the herald one', ds.prompts.find((p) => p.text === 'real prompt')?.note == null)
+	check('a `-> ` note below a DUCKIES line attaches to the directive as its done-marker', ds.duckies[0].note?.text === 'removed 2 idle lanes')
+	check('the prompt above keeps its own note, not the duckies one', ds.prompts.find((p) => p.text === 'real prompt')?.note == null)
 
 	// buildOps mirrors a finished directive's summary just below its line (once), and a re-parse of
 	// that output round-trips — the note is now present, so buildOps re-adds nothing.
-	const fresh = parse('moonbase\n\tHERALD: tidy up here\n')
-	fresh.sessions[0].heralds[0].desiredNote = 'removed 2 idle lanes'
+	const fresh = parse('moonbase\n\tDUCKIES: tidy up here\n')
+	fresh.sessions[0].duckies[0].desiredNote = 'removed 2 idle lanes'
 	const written = applyOps(fresh.lines, buildOps(fresh.sessions)).join('\n')
-	check('buildOps writes the `-> ` summary below the HERALD line', written === 'moonbase\n\tHERALD: tidy up here\n\t\t-> removed 2 idle lanes\n', JSON.stringify(written))
+	check('buildOps writes the `-> ` summary below the DUCKIES line', written === 'moonbase\n\tDUCKIES: tidy up here\n\t\t-> removed 2 idle lanes\n', JSON.stringify(written))
 	const round = parse(written)
-	check('a HERALD line that already has a `-> ` note re-adds nothing', applyOps(round.lines, buildOps(round.sessions)).join('\n') === written)
+	check('a DUCKIES line that already has a `-> ` note re-adds nothing', applyOps(round.lines, buildOps(round.sessions)).join('\n') === written)
 
-	// A HERALD directive under a worktree carries that worktree's label + dir, not the repo's.
-	const wt = parse('superapp\n\t: main task\n\tfeature-x\n\t\tHERALD: move this worktree to its own file\n')
-	const wtHerald = wt.sessions.find((x) => x.label === 'superapp-feature-x')?.heralds[0]
-	check('a HERALD under a worktree carries the worktree label + dir', wtHerald?.label === 'superapp-feature-x' && wtHerald?.dir.endsWith('/superapp-worktrees/feature-x'), JSON.stringify(wtHerald))
+	// A DUCKIES directive under a worktree carries that worktree's label + dir, not the repo's.
+	const wt = parse('superapp\n\t: main task\n\tfeature-x\n\t\tDUCKIES: move this worktree to its own file\n')
+	const wtDuckies = wt.sessions.find((x) => x.label === 'superapp-feature-x')?.duckies[0]
+	check('a DUCKIES under a worktree carries the worktree label + dir', wtDuckies?.label === 'superapp-feature-x' && wtDuckies?.dir.endsWith('/superapp-worktrees/feature-x'), JSON.stringify(wtDuckies))
 
-	// A leading `!` (`!HERALD:`) is a reveal request: the directive parses clean (no `!` in the text),
+	// A leading `!` (`!DUCKIES:`) is a reveal request: the directive parses clean (no `!` in the text),
 	// with showNow set and a stripped-line ready. Once the reveal fires (showNowFired), buildOps
 	// rewrites the line without the `!`.
-	const bang = parse('moonbase\n\t!HERALD: tidy up here\n')
-	const bh = bang.sessions[0].heralds[0]
-	check('a `!HERALD:` parses clean with showNow set', bh.directive === 'tidy up here' && bh.showNow === true && bh.strippedLine === '\tHERALD: tidy up here', JSON.stringify(bh))
+	const bang = parse('moonbase\n\t!DUCKIES: tidy up here\n')
+	const bh = bang.sessions[0].duckies[0]
+	check('a `!DUCKIES:` parses clean with showNow set', bh.directive === 'tidy up here' && bh.showNow === true && bh.strippedLine === '\tDUCKIES: tidy up here', JSON.stringify(bh))
 	bh.showNowFired = true
-	check('a fired `!HERALD:` reveal is consumed (the `!` is stripped)', applyOps(bang.lines, buildOps(bang.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n', JSON.stringify(applyOps(bang.lines, buildOps(bang.sessions))))
+	check('a fired `!DUCKIES:` reveal is consumed (the `!` is stripped)', applyOps(bang.lines, buildOps(bang.sessions)).join('\n') === 'moonbase\n\tDUCKIES: tidy up here\n', JSON.stringify(applyOps(bang.lines, buildOps(bang.sessions))))
 
-	// A column-0 `HERALD:` directive can sit anywhere, not under a session/worktree. It parses into
-	// the top-level `heralds` list (not as a session header, and never mistaken for a `repo:worktree`
-	// split on the `:` in `HERALD:`), carrying an empty label/dir (resolved to the file basename later).
-	const top = parse('HERALD: tidy the whole file\napp\n\t: a task\n')
-	check('a column-0 HERALD parses into top-level heralds, not a session', top.heralds.length === 1 && top.heralds[0].directive === 'tidy the whole file' && top.sessions.length === 1 && top.sessions[0].label === 'app', JSON.stringify({ heralds: top.heralds, labels: top.sessions.map((s) => s.label) }))
-	check('a top-level HERALD has empty label/dir (resolved later) and indent ""', top.heralds[0].label === '' && top.heralds[0].dir === '' && top.heralds[0].indent === '')
+	// A column-0 `DUCKIES:` directive can sit anywhere, not under a session/worktree. It parses into
+	// the top-level `duckies` list (not as a session header, and never mistaken for a `repo:worktree`
+	// split on the `:` in `DUCKIES:`), carrying an empty label/dir (resolved to the file basename later).
+	const top = parse('DUCKIES: tidy the whole file\napp\n\t: a task\n')
+	check('a column-0 DUCKIES parses into top-level duckies, not a session', top.duckies.length === 1 && top.duckies[0].directive === 'tidy the whole file' && top.sessions.length === 1 && top.sessions[0].label === 'app', JSON.stringify({ duckies: top.duckies, labels: top.sessions.map((s) => s.label) }))
+	check('a top-level DUCKIES has empty label/dir (resolved later) and indent ""', top.duckies[0].label === '' && top.duckies[0].dir === '' && top.duckies[0].indent === '')
 
 	// A `-> ` note indented below a top-level directive attaches to it as its done-marker (nothing
-	// else outside a session is captured), and buildHeraldOps round-trips it (re-adds nothing).
-	const topDone = parse('HERALD: tidy the whole file\n\t-> tidied 3 blocks\napp\n\t: a task\n')
-	check('a `-> ` note below a top-level HERALD attaches to it', topDone.heralds[0].note?.text === 'tidied 3 blocks')
-	check('a done top-level HERALD re-adds nothing', buildHeraldOps(topDone.heralds).length === 0)
+	// else outside a session is captured), and buildDuckiesOps round-trips it (re-adds nothing).
+	const topDone = parse('DUCKIES: tidy the whole file\n\t-> tidied 3 blocks\napp\n\t: a task\n')
+	check('a `-> ` note below a top-level DUCKIES attaches to it', topDone.duckies[0].note?.text === 'tidied 3 blocks')
+	check('a done top-level DUCKIES re-adds nothing', buildDuckiesOps(topDone.duckies).length === 0)
 
-	// buildHeraldOps writes a finished top-level directive's summary just below its line (one tab in).
-	const topFresh = parse('HERALD: tidy the whole file\napp\n\t: a task\n')
-	topFresh.heralds[0].desiredNote = 'tidied 3 blocks'
-	check('buildHeraldOps writes a top-level `-> ` note at one tab', applyOps(topFresh.lines, buildHeraldOps(topFresh.heralds)).join('\n') === 'HERALD: tidy the whole file\n\t-> tidied 3 blocks\napp\n\t: a task\n', JSON.stringify(applyOps(topFresh.lines, buildHeraldOps(topFresh.heralds))))
+	// buildDuckiesOps writes a finished top-level directive's summary just below its line (one tab in).
+	const topFresh = parse('DUCKIES: tidy the whole file\napp\n\t: a task\n')
+	topFresh.duckies[0].desiredNote = 'tidied 3 blocks'
+	check('buildDuckiesOps writes a top-level `-> ` note at one tab', applyOps(topFresh.lines, buildDuckiesOps(topFresh.duckies)).join('\n') === 'DUCKIES: tidy the whole file\n\t-> tidied 3 blocks\napp\n\t: a task\n', JSON.stringify(applyOps(topFresh.lines, buildDuckiesOps(topFresh.duckies))))
 
 	// A `!` on a column-0 directive: showNow set, stripped line has no leading tab (column 0).
-	const topBang = parse('!HERALD: tidy the whole file\n')
-	check('a column-0 `!HERALD:` sets showNow with a tab-less stripped line', topBang.heralds[0].showNow === true && topBang.heralds[0].strippedLine === 'HERALD: tidy the whole file', JSON.stringify(topBang.heralds[0]))
+	const topBang = parse('!DUCKIES: tidy the whole file\n')
+	check('a column-0 `!DUCKIES:` sets showNow with a tab-less stripped line', topBang.duckies[0].showNow === true && topBang.duckies[0].strippedLine === 'DUCKIES: tidy the whole file', JSON.stringify(topBang.duckies[0]))
 
 	// While its background agent runs, a directive gets an `[EXECUTING]` marker just below it —
-	// buildHeraldOps inserts it when desiredKind is EXECUTING and no marker is present yet.
-	const exec = parse('moonbase\n\tHERALD: tidy up here\n')
-	exec.sessions[0].heralds[0].desiredKind = 'EXECUTING'
-	check('buildHeraldOps writes `[EXECUTING]` below a running HERALD line', applyOps(exec.lines, buildOps(exec.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n', JSON.stringify(applyOps(exec.lines, buildOps(exec.sessions))))
+	// buildDuckiesOps inserts it when desiredKind is EXECUTING and no marker is present yet.
+	const exec = parse('moonbase\n\tDUCKIES: tidy up here\n')
+	exec.sessions[0].duckies[0].desiredKind = 'EXECUTING'
+	check('buildDuckiesOps writes `[EXECUTING]` below a running DUCKIES line', applyOps(exec.lines, buildOps(exec.sessions)).join('\n') === 'moonbase\n\tDUCKIES: tidy up here\n\t\t[EXECUTING]\n', JSON.stringify(applyOps(exec.lines, buildOps(exec.sessions))))
 
 	// An `[EXECUTING]` line below a directive parses as the directive's marker (not a prompt's,
 	// not a session marker), and re-adds nothing while it stays EXECUTING.
-	const execRound = parse('moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
-	const eh = execRound.sessions[0].heralds[0]
-	check('an `[EXECUTING]` below a HERALD line parses as the directive marker', eh.marker?.kind === 'EXECUTING' && execRound.sessions[0].prompts.length === 0 && execRound.sessions[0].desiredSession == null, JSON.stringify({ marker: eh.marker, prompts: execRound.sessions[0].prompts.length, sess: execRound.sessions[0].desiredSession }))
+	const execRound = parse('moonbase\n\tDUCKIES: tidy up here\n\t\t[EXECUTING]\n')
+	const eh = execRound.sessions[0].duckies[0]
+	check('an `[EXECUTING]` below a DUCKIES line parses as the directive marker', eh.marker?.kind === 'EXECUTING' && execRound.sessions[0].prompts.length === 0 && execRound.sessions[0].desiredSession == null, JSON.stringify({ marker: eh.marker, prompts: execRound.sessions[0].prompts.length, sess: execRound.sessions[0].desiredSession }))
 	eh.desiredKind = 'EXECUTING'
-	check('a still-running HERALD `[EXECUTING]` re-adds nothing', applyOps(execRound.lines, buildOps(execRound.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
+	check('a still-running DUCKIES `[EXECUTING]` re-adds nothing', applyOps(execRound.lines, buildOps(execRound.sessions)).join('\n') === 'moonbase\n\tDUCKIES: tidy up here\n\t\t[EXECUTING]\n')
 
 	// When the agent finishes, the marker is dropped and the `-> ` note takes its place (no `[DONE]`).
-	const execDone = parse('moonbase\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
-	execDone.sessions[0].heralds[0].desiredKind = null
-	execDone.sessions[0].heralds[0].desiredNote = 'removed 2 idle lanes'
-	check('a finished HERALD drops `[EXECUTING]` and writes its `-> ` note in its place', applyOps(execDone.lines, buildOps(execDone.sessions)).join('\n') === 'moonbase\n\tHERALD: tidy up here\n\t\t-> removed 2 idle lanes\n', JSON.stringify(applyOps(execDone.lines, buildOps(execDone.sessions))))
+	const execDone = parse('moonbase\n\tDUCKIES: tidy up here\n\t\t[EXECUTING]\n')
+	execDone.sessions[0].duckies[0].desiredKind = null
+	execDone.sessions[0].duckies[0].desiredNote = 'removed 2 idle lanes'
+	check('a finished DUCKIES drops `[EXECUTING]` and writes its `-> ` note in its place', applyOps(execDone.lines, buildOps(execDone.sessions)).join('\n') === 'moonbase\n\tDUCKIES: tidy up here\n\t\t-> removed 2 idle lanes\n', JSON.stringify(applyOps(execDone.lines, buildOps(execDone.sessions))))
 
 	// The nearest-item rule: an `[EXECUTING]` between a marked prompt and a directive belongs to the
 	// directive (nearer), leaving the prompt's own earlier marker alone.
-	const nearest = parse('moonbase\n\t: real prompt\n\t\t[DONE]\n\tHERALD: tidy up here\n\t\t[EXECUTING]\n')
+	const nearest = parse('moonbase\n\t: real prompt\n\t\t[DONE]\n\tDUCKIES: tidy up here\n\t\t[EXECUTING]\n')
 	const ns = nearest.sessions[0]
-	check('an `[EXECUTING]` nearer a HERALD than a prompt binds to the directive', ns.heralds[0].marker?.kind === 'EXECUTING' && ns.prompts.find((p) => p.text === 'real prompt')?.marker?.kind === 'DONE', JSON.stringify({ herald: ns.heralds[0].marker, prompt: ns.prompts.find((p) => p.text === 'real prompt')?.marker }))
+	check('an `[EXECUTING]` nearer a DUCKIES than a prompt binds to the directive', ns.duckies[0].marker?.kind === 'EXECUTING' && ns.prompts.find((p) => p.text === 'real prompt')?.marker?.kind === 'DONE', JSON.stringify({ duckies: ns.duckies[0].marker, prompt: ns.prompts.find((p) => p.text === 'real prompt')?.marker }))
 
 	// Top-level (column-0) directives carry the marker the same way: parse it from an indented
-	// `[EXECUTING]` below the line, and buildHeraldOps inserts/drops it at one tab in.
-	const topExec = parse('HERALD: tidy the whole file\napp\n\t: a task\n')
-	topExec.heralds[0].desiredKind = 'EXECUTING'
-	check('buildHeraldOps writes a top-level `[EXECUTING]` at one tab', applyOps(topExec.lines, buildHeraldOps(topExec.heralds)).join('\n') === 'HERALD: tidy the whole file\n\t[EXECUTING]\napp\n\t: a task\n', JSON.stringify(applyOps(topExec.lines, buildHeraldOps(topExec.heralds))))
-	const topExecRound = parse('HERALD: tidy the whole file\n\t[EXECUTING]\napp\n\t: a task\n')
-	check('an `[EXECUTING]` below a top-level HERALD parses as its marker', topExecRound.heralds[0].marker?.kind === 'EXECUTING', JSON.stringify(topExecRound.heralds[0].marker))
+	// `[EXECUTING]` below the line, and buildDuckiesOps inserts/drops it at one tab in.
+	const topExec = parse('DUCKIES: tidy the whole file\napp\n\t: a task\n')
+	topExec.duckies[0].desiredKind = 'EXECUTING'
+	check('buildDuckiesOps writes a top-level `[EXECUTING]` at one tab', applyOps(topExec.lines, buildDuckiesOps(topExec.duckies)).join('\n') === 'DUCKIES: tidy the whole file\n\t[EXECUTING]\napp\n\t: a task\n', JSON.stringify(applyOps(topExec.lines, buildDuckiesOps(topExec.duckies))))
+	const topExecRound = parse('DUCKIES: tidy the whole file\n\t[EXECUTING]\napp\n\t: a task\n')
+	check('an `[EXECUTING]` below a top-level DUCKIES parses as its marker', topExecRound.duckies[0].marker?.kind === 'EXECUTING', JSON.stringify(topExecRound.duckies[0].marker))
+}
+
+// ---- supervisor dashboard: colorizeLog / appendLabel -------------------------------------
+{
+	// Color off is a pass-through; color on wraps by category with the leading verb bolded.
+	check('colorizeLog is a no-op when color is disabled', colorizeLog('spawning app in ~/x', false) === 'spawning app in ~/x')
+	const warn = colorizeLog('WARN jev failed', true)
+	check('a WARN line is colored yellow (38;5;214) and bolded', warn.startsWith('\x1b[38;5;214m\x1b[1mWARN') && warn.endsWith('\x1b[0m'), JSON.stringify(warn))
+	check('a spawning line is colored green (38;5;78)', colorizeLog('spawning app in ~/x', true).startsWith('\x1b[38;5;78m\x1b[1mspawning'), JSON.stringify(colorizeLog('spawning app in ~/x', true)))
+	check('a send line is colored cyan (38;5;45)', colorizeLog('send app:1 "hi"', true).startsWith('\x1b[38;5;45m'))
+
+	// appendLabel: column-0 header at EOF, one blank separator, trailing-newline normalized.
+	check('appendLabel adds a blank separator before the new header', appendLabel('app\n', 'visa') === 'app\n\nvisa\n', JSON.stringify(appendLabel('app\n', 'visa')))
+	check('appendLabel on empty content is just the header', appendLabel('', 'visa') === 'visa\n')
+	check('appendLabel collapses trailing newlines (no double blank)', appendLabel('app\n\n\n', 'visa') === 'app\n\nvisa\n', JSON.stringify(appendLabel('app\n\n\n', 'visa')))
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)

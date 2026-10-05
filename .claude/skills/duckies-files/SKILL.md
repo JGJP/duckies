@@ -1,15 +1,15 @@
 ---
-name: herald-files
-description: How the herald `*.herald` control files work and how to add prompts, commands, sessions, lanes, and worktrees to them. Use whenever asked to queue/add/edit work in a `.herald` file, or to explain the format. Key rule the user always wants respected — the queue runs BOTTOM-TO-TOP, and anything that should NOT run immediately must be held back by an indented `#` barrier row placed below it.
+name: duckies-files
+description: How the duckies `*.dk` control files work and how to add prompts, commands, sessions, lanes, and worktrees to them. Use whenever asked to queue/add/edit work in a `.dk` file, or to explain the format. Key rule the user always wants respected — the queue runs BOTTOM-TO-TOP, and anything that should NOT run immediately must be held back by an indented `#` barrier row placed below it.
 ---
 
-# The `.herald` files
+# The `.dk` files
 
-Each `*.herald` file in the repo dir is a live control file. The supervisor reads every
+Each `*.dk` file in `~/.config/duckies/duckspaces` is a live control file. The supervisor reads every
 one of them once a second, and for each **session** drives a tmux session + a Claude Code
 pane, sending queued prompts and running queued commands. It also **rewrites the files in
 place** to stamp status markers (`[EXECUTING]`, `[DONE]`, `[NEEDS ATTENTION]`). So editing a
-`.herald` file *is* the interface: add a line, and it gets queued and run.
+`.dk` file *is* the interface: add a line, and it gets queued and run.
 
 Indent with **tabs** (one tab per nesting level), matching the rows already in the file.
 
@@ -58,7 +58,7 @@ Under a session header (a column-0 line naming a repo/dir), add indented lines:
   	|   at getUser (src/user.ts:42)
   ```
 - **Slash commands / macros** — a prompt can be a slash command (`: /ship`). A `@name` line is
-  a **macro** that expands to a saved sequence of steps (see `herald-macros.yaml` for the
+  a **macro** that expands to a saved sequence of steps (see `~/.config/duckies/macros.yaml` for the
   defined ones, e.g. `@sm`, `@gcom`).
 
 ## Parallel lanes
@@ -76,7 +76,7 @@ myrepo
 
 ## Sessions, worktrees, show
 
-- **Session header** (column 0): an alias from `herald-aliases.yaml`, a path, or a bare name
+- **Session header** (column 0): an alias from `~/.config/duckies/aliases.yaml`, a path, or a bare name
   (→ `~/_dev/<name>`). A leading `!` (`!myrepo`) switches your tmux client to it now.
 - **Worktree**: an indented line that *isn't* a sigil names a git worktree of the session's
   repo; items nested under it run there. If the base isn't a git repo, it's symlinked instead
@@ -117,5 +117,5 @@ Notes:
 ## After editing
 
 The running supervisor picks the file up within a second — no restart needed for content
-edits. (Editing the herald **source** — `herald.ts`/`setup.ts` — or clearing `state/` is
+edits. (Editing the duckies **source** — `duckies.ts`/`setup.ts` — or clearing `state/` is
 different: stop the supervisor first via the `terminate-running-process` skill.)

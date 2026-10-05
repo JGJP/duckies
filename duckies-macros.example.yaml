@@ -1,10 +1,10 @@
-# Copy to herald-macros.yaml (gitignored). Each key is a macro name; a `@<name>` line on
-# its own in a .herald file becomes one queue item whose block runs in sequence. The block's
-# lines are ordinary .herald rows — `:` prompts and `$` commands (`#` lines are comments,
+# Copy to ~/.config/duckies/macros.yaml. Each key is a macro name; a `@<name>` line on
+# its own in a .dk file becomes one queue item whose block runs in sequence. The block's
+# lines are ordinary .dk rows — `:` prompts and `$` commands (`#` lines are comments,
 # dropped). The `@<name>` line stays in the file and carries a single overall marker
 # ([EXECUTING] while any step runs, [DONE] when all finish); the block is expanded in memory.
 #
-# ORDER: steps run bottom-to-top, like every herald queue — the block's LAST line runs first.
+# ORDER: steps run bottom-to-top, like every duckies queue — the block's LAST line runs first.
 # So put the setup command at the bottom and the follow-up prompt above it.
 #
 # Arguments: pass them after the name — `@review 2500 "the auth refactor"`. In the block,

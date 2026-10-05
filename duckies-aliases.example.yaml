@@ -1,5 +1,5 @@
-# Copy to herald-aliases.yaml (gitignored). Maps a short label to a repo path, so a
-# header in herald-control can be just the label instead of the full path. `~`
+# Copy to ~/.config/duckies/aliases.yaml. Maps a short label to a repo path, so a
+# header in duckies-control can be just the label instead of the full path. `~`
 # expands to your home dir. A header that isn't a listed alias falls back to the
 # usual rules (a path anywhere, or a bare name → ~/_dev/<name>).
 moonbase: ~/projects/moonbase

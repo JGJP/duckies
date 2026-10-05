@@ -1,14 +1,14 @@
-# herald
+# duckies
 
 Run many interactive Claude Code instances in tmux and control/observe them all
-through plain-text `.herald` files.
+through plain-text `.dk` files.
 
 Each file is both a **dashboard** (Claude activity is written back as status
 markers) and a **control surface** (edits start/stop/clear sessions and queue
-prompts). A `tsx` supervisor loop merges every `*.herald` file in the repo dir into
-one logical control and reconciles it against live tmux every second. Split your
-work across as many `.herald` files as you like (e.g. `work.herald`,
-`personal.herald`) — they're combined into one dashboard and each is rewritten in
+prompts). A `tsx` supervisor loop merges every `*.dk` file in `~/.config/duckies/duckspaces`
+into one logical control and reconciles it against live tmux every second. Split your
+work across as many `.dk` files as you like (e.g. `work.dk`,
+`personal.dk`) — they're combined into one dashboard and each is rewritten in
 place. If the same label appears in more than one file (or twice in one), all its rows
 are **merged into one queue** — each file's rows keep their place and markers write back
 to whichever file they came from.
@@ -16,30 +16,30 @@ to whichever file they came from.
 ## Requirements
 
 - **tmux** and **Node 18+** (with `pnpm`) — required on any platform.
-- **Claude Code** (`claude`) on your `PATH` — or point `HERALD_AGENT_CMD` at another agent CLI.
-- A shell herald can install a completion hook for: **fish**, **zsh**, or **bash**.
-- **macOS** is optional-nice: set `HERALD_TERM_APP` to have a `show`/`!` foreground your
+- **Claude Code** (`claude`) on your `PATH` — or point `DUCKIES_AGENT_CMD` at another agent CLI.
+- A shell duckies can install a completion hook for: **fish**, **zsh**, or **bash**.
+- **macOS** is optional-nice: set `DUCKIES_TERM_APP` to have a `show`/`!` foreground your
   terminal app. Everything else (the supervisor, TUI, tmux control) is cross-platform.
 
 ## Setup (once)
 
 ```sh
 pnpm install
-pnpm setup   # makes herald-hook executable, creates state/, installs a
+pnpm setup   # makes duckies-hook executable, creates state/, installs a
              # command-completion hook for your shell (fish, zsh, and bash are
              # supported), and installs the Stop + Notification +
              # UserPromptSubmit hooks into ~/.claude/settings.json
 ```
 
 `setup` merges its hooks into your **global** `~/.claude/settings.json` (backing
-it up to `settings.json.herald-bak`) and is idempotent — re-run it any time (e.g.
-after moving the repo). The Claude hooks are guarded by `$HERALD_LABEL` and the
-shell hooks by `$HERALD_SHELL`, so both are a no-op for your normal Claude sessions
-and shells and only fire for herald-launched ones.
+it up to `settings.json.dk-bak`) and is idempotent — re-run it any time (e.g.
+after moving the repo). The Claude hooks are guarded by `$DUCKIES_LABEL` and the
+shell hooks by `$DUCKIES_SHELL`, so both are a no-op for your normal Claude sessions
+and shells and only fire for duckies-launched ones.
 
 The **command-completion hook** reports when a `$command` has finished. fish
 auto-loads it from `~/.config/fish/conf.d`; bash and zsh get a `source` line
-appended to `~/.bashrc` / `~/.zshrc` (each backed up once to `<rc>.herald-bak`).
+appended to `~/.bashrc` / `~/.zshrc` (each backed up once to `<rc>.dk-bak`).
 Only the shell whose config exists is touched, and each hook self-activates just
 in its own shell, so whichever shell the session's window runs is handled
 automatically.
@@ -47,11 +47,25 @@ automatically.
 ## Run
 
 ```sh
-pnpm start            # merge every ./*.herald file and reconcile each second
+pnpm start            # merge every ./*.dk file and reconcile each second
 pnpm start --dry-run  # log intended tmux actions / rewrites without doing them
-pnpm herald           # edit .herald in the built-in live editor (see below)
-pnpm herald work.herald  # …or edit a specific control file
+pnpm duckies           # edit .dk in the built-in live editor (see below)
+pnpm duckies work.dk  # …or edit a specific control file
 ```
+
+### Supervisor menu
+
+When `pnpm start` runs in a real terminal, its log is colorized by action/severity and a popup menu is
+available — press **`m`**. From the menu (arrow keys + enter, or the shortcut letter):
+
+- **`a`/`c`/`w`** — open `aliases.yaml` / `macros.yaml` / `widgets.yaml` in `$EDITOR`.
+- **`n`** — add a new label: pick one of your `.dk` files, type the label, and it's appended as a new
+  session header, then that file opens in `$EDITOR`. The supervisor spawns the session on its next tick.
+
+Editing happens in your terminal `$EDITOR` (e.g. `nvim`); the supervisor keeps reconciling in the
+background while you edit — log output is held and flushed when the editor exits. `Esc` closes the menu;
+`Ctrl-C` stops the supervisor (restoring the terminal). The menu/coloring auto-disable when stdout isn't a
+TTY (dry-run, piped) or when `DUCKIES_TUI=0`.
 
 ## Quickstart
 
@@ -61,7 +75,7 @@ In one terminal, start the supervisor:
 pnpm start
 ```
 
-In another, put this in a `.herald` file (a bare name resolves to `~/_dev/<name>`):
+In another, put this in a `.dk` file (a bare name resolves to `~/_dev/<name>`):
 
 ```
 moonbase
@@ -78,11 +92,11 @@ tmux attach -t __moonbase
 When Claude finishes, the line flips to `[DONE]`. Queue more work by adding lines
 **above** it (newest on top) — see the examples below.
 
-## Editing live (`pnpm herald`)
+## Editing live (`pnpm duckies`)
 
-`pnpm herald [file]` opens a `.herald` control file (default `.herald`) in a
+`pnpm duckies [file]` opens a `.dk` control file (default `.dk`) in a
 **built-in, vim-like editor** — a self-contained modal TUI (no external editor
-process) with `.herald` syntax highlighting. Pass a filename to edit a specific one.
+process) with `.dk` syntax highlighting. Pass a filename to edit a specific one.
 While you type, the supervisor keeps writing to the same file; the editor folds the
 controller's out-of-band writes (marker updates, drained `show` lines, …) into your
 buffer **without disturbing what you're typing**:
@@ -94,13 +108,13 @@ buffer **without disturbing what you're typing**:
   (your line wins on a genuine conflict) and keeps the cursor on the line you were on.
 
 Save with `:w`; quit with `:q` (`:wq`/`:x` to do both). It needs an interactive
-terminal and respects `HERALD_FILE`. Runs alongside `pnpm start` (that's the point).
+terminal and respects `DUCKIES_FILE`. Runs alongside `pnpm start` (that's the point).
 
 ### Per-session view window
 
-Every managed session opens with this editor as its **first window** (`herald`),
-already scoped to that session: `pnpm herald --session <label>`. The buffer is the
-session's blocks **compiled across every `*.herald` file** (a label can appear in
+Every managed session opens with this editor as its **first window** (`duckies`),
+already scoped to that session: `pnpm duckies --session <label>`. The buffer is the
+session's blocks **compiled across every `*.dk` file** (a label can appear in
 more than one — they're merged into one queue), shown verbatim with all status
 markers, notes, and in-block comments. It syncs both ways — the supervisor's marker
 writes fold in live, and `:w` writes your edits back into the exact source file each
@@ -121,9 +135,9 @@ shows where the worktree lives); edits write back to just the worktree's own lin
 - **Ex** — `:w` `:q` `:wq` `:x` `:q!` and `:{number}` to jump to a line;
   `/text` then `n`/`N` to search.
 
-## The `.herald` files
+## The `.dk` files
 
-The supervisor picks up **every** `*.herald` file in the repo dir and merges them
+The supervisor picks up **every** `*.dk` file in `~/.config/duckies/duckspaces` and merges them
 into one control (sessions from all files combined, alphabetical by filename). Each
 file is written back in place, so you can split work across several — one per
 context — and still watch them as a single dashboard. The whole of each file is the
@@ -143,7 +157,7 @@ moonbase-2
 ```
 
 - A line at column 0 is a **session**. It is, in order of precedence:
-  - an **alias** listed in `herald-aliases.yaml` → its mapped path, tmux session
+  - an **alias** listed in `~/.config/duckies/aliases.yaml` → its mapped path, tmux session
     `__<alias>`; or
   - a **path** (`/abs`, `~/…`, or anything containing `/`) → that dir, with the
     label/tmux name taken from its basename (e.g. `~/projects/moonbase` →
@@ -151,7 +165,7 @@ moonbase-2
   - a **bare name** → dir `~/_dev/<name>`, tmux session `__<name>`.
 
   A header may also carry a `:<worktree>` suffix (`<repo>:<feature>`) — the
-  concatenated [worktree](#the-herald-files) form, equivalent to nesting a bare
+  concatenated [worktree](#the-duckies-files) form, equivalent to nesting a bare
   `<feature>` line under the `<repo>` header but without the extra indent. The part
   before the `:` resolves by the three rules above; a colon inside a known alias key
   is left intact rather than split.
@@ -166,7 +180,7 @@ moonbase-2
   tears down that session's tmux session but **keeps its tracked conversation ids**,
   and won't respawn it while the `?` is there. Remove the `?` and it comes back,
   `--resume`-ing the same conversation(s) (see [Conversation resume](#notes)). Unlike
-  `!`, the `?` is a **persistent toggle** — herald leaves it in the file for you to
+  `!`, the `?` is a **persistent toggle** — duckies leaves it in the file for you to
   flip. Sleep **cascades** to the worktrees nested under that header, so `?moonbase`
   parks the repo and all its worktrees at once — but only the ones under *that*
   occurrence: if the same repo appears in another block without a `?`, that block's
@@ -186,17 +200,17 @@ moonbase-2
   [Env overrides](#env-overrides)); answering it (submitting a prompt into the pane)
   flips it back to `[EXECUTING]`. `[WAITING]` marks a turn that has ended but left **backgrounded
   tasks running** (e.g. a `/watch-pr-comments` loop polling CI): the pane's `· N
-  shells` indicator tells herald a `<task-notification>` will resume Claude on its
+  shells` indicator tells duckies a `<task-notification>` will resume Claude on its
   own (no hook fires), so the item is held — not latched `[DONE]`, and the next
   queued item is not dispatched into a pane that's about to wake. It oscillates
   `[WAITING]`↔`[EXECUTING]` as the loop wakes, and settles to `[DONE]` only once the
   background work clears.
-- **One-line summary (`->`).** When a `:` prompt finishes, herald mirrors a one-line
+- **One-line summary (`->`).** When a `:` prompt finishes, duckies mirrors a one-line
   recap of the turn into the file just below the prompt, prefixed with `-> ` (at the
-  marker's indent). Every herald-launched Claude is asked — via a combined system-prompt
+  marker's indent). Every duckies-launched Claude is asked — via a combined system-prompt
   file passed at spawn (`--append-system-prompt-file`, folding in your own base prompt from
-  `HERALD_SYSTEM_PROMPT_FILE` so it isn't clobbered) — to end each turn with a `-> …` line;
-  herald reads that line from the transcript and writes it back, so the recap survives even
+  `DUCKIES_SYSTEM_PROMPT_FILE` so it isn't clobbered) — to end each turn with a `-> …` line;
+  duckies reads that line from the transcript and writes it back, so the recap survives even
   after the `[DONE]` marker is stripped as the frontier moves on. It's inert (never re-runs,
   isn't a worktree). No `-> ` line in Claude's reply ⇒ nothing is written.
 
@@ -222,7 +236,7 @@ moonbase-2
   		[EXECUTING]
   ```
 - `$command` lines run **once** in the session's **shell window** (a separate window
-  from the claude pane; the windows are `herald` view, `claude`, then `shell`). A
+  from the claude pane; the windows are `duckies` view, `claude`, then `shell`). A
   command is marked `[EXECUTING]` when dispatched and only
   advances to `[DONE]` once it has actually **exited** (a per-shell hook writes its
   exit status to `state/<label>.cmd` and the controller waits for that done-file). A command
@@ -302,9 +316,9 @@ moonbase-2
   If clearing empties a **live** label entirely, the label itself is then removed (a worktree
   cascades up to remove its now-empty repo), so a `%` at the top of a worktree cleans the whole
   thing away when its work is done. Idle or never-spawned empty headers are left in place.
-- A **`HERALD: …`** line asks a background Claude to **edit the `.herald` files themselves** (e.g.
-  `HERALD: remove every idle lane here`) — it's a one-shot meta-command, not a queue item. See
-  [HERALD directives](#herald-directives) below.
+- A **`DUCKIES: …`** line asks a background Claude to **edit the `.dk` files themselves** (e.g.
+  `DUCKIES: remove every idle lane here`) — it's a one-shot meta-command, not a queue item. See
+  [DUCKIES directives](#duckies-directives) below.
 - Only the **current** item **per lane** keeps a marker — it is that lane's *frontier*:
   items above it (nearer the top) are still pending, items below it have already run.
   When the next item is marked `[EXECUTING]`, the previous marker is stripped, so each
@@ -335,7 +349,7 @@ moonbase-2
 
 Each spawned session has **two windows**: window `claude` (driven by the
 controller) and window `shell` (a free shell for you to run commands in). The
-claude pane is tagged with a pane-scoped tmux option (`@herald = claude`), so
+claude pane is tagged with a pane-scoped tmux option (`@duckies = claude`), so
 prompts always target it regardless of which window/pane is focused.
 
 Attach to a session with `tmux attach -t __<label>` (switch windows with your
@@ -343,9 +357,9 @@ tmux prefix + `n`/`p`).
 
 ### Capturing what you type
 
-The `.herald` file isn't one-way. When you type a prompt **directly** into a
+The `.dk` file isn't one-way. When you type a prompt **directly** into a
 controlled `claude` pane, or run a command **directly** in its `shell` window,
-herald mirrors that back into the file so the session's log stays complete —
+duckies mirrors that back into the file so the session's log stays complete —
 whether the work came from the file or from your hands.
 
 - The row is added as the session's **newest** already-run/running item: inserted
@@ -355,7 +369,7 @@ whether the work came from the file or from your hands.
   frontier stays pending and resumes once your prompt finishes.
 - A command that finishes while a prompt is still `[EXECUTING]` (the two panes run
   at once) is logged **below** that prompt without disturbing it.
-- herald knows its **own** sends (they fire the same hooks), so only input *you*
+- duckies knows its **own** sends (they fire the same hooks), so only input *you*
   typed is captured — never the prompts/commands the controller dispatched.
 - Numbered lanes are preserved: typing into `claude2` writes a `:2` row, a command
   in `shell2` writes a `$2` row.
@@ -368,7 +382,7 @@ their rc / are recreated).
 
 ## Usage examples
 
-All of these are just text you put in a `.herald` file while `pnpm start` runs.
+All of these are just text you put in a `.dk` file while `pnpm start` runs.
 Remember the queue drains **bottom-to-top**, one item at a time, so **new work
 goes on top**. Indentation is with **tabs**.
 
@@ -542,26 +556,26 @@ infra
 ```
 
 A header containing `/` is used as a path (tmux name = its basename); a bare name
-that matches `herald-aliases.yaml` uses the mapped path. See the aliases section.
+that matches `~/.config/duckies/aliases.yaml` uses the mapped path. See the aliases section.
 
 ## Editor syntax highlighting
 
-`.herald` grammars for three editors, all mirroring `parse()` in `herald.ts`:
+`.dk` grammars for three editors, all mirroring `parse()` in `duckies.ts`:
 
-- **Sublime Text** — `herald.sublime-syntax` (drop into `Packages/User`). Drop
-  `herald.tmPreferences` in alongside it so `toggle_comment` (`Cmd`/`Ctrl`+`/`)
+- **Sublime Text** — `duckies.sublime-syntax` (drop into `Packages/User`). Drop
+  `duckies.tmPreferences` in alongside it so `toggle_comment` (`Cmd`/`Ctrl`+`/`)
   comments rows out with `#`. For the green **macro** / blue **command** styling, copy
-  `herald.sublime-color-scheme`, rename it to match your active color scheme (e.g.
+  `duckies.sublime-color-scheme`, rename it to match your active color scheme (e.g.
   `Mariana.sublime-color-scheme`), and place it where Sublime will merge it — in
   `Packages/User` if your scheme is built-in, or in its own package folder (e.g.
-  `Packages/herald/`) if your scheme itself lives in `Packages/User`. `pnpm setup` also
-  installs a **reveal plugin** (`herald_reveal.py` + `herald.sublime-commands`): run
-  *"Herald: Reveal this line's pane"* from the command palette to add a leading `!` to the
+  `Packages/duckies/`) if your scheme itself lives in `Packages/User`. `pnpm setup` also
+  installs a **reveal plugin** (`duckies_reveal.py` + `duckies.sublime-commands`): run
+  *"Duckies: Reveal this line's pane"* from the command palette to add a leading `!` to the
   current line and save — one click to bring that item's pane on screen.
 - **Neovim / Vim** — `editors/nvim/` (`syntax` + `ftdetect` + `ftplugin`). Symlink or
-  copy the three `herald.vim` files into the matching dirs under `~/.config/nvim/`;
+  copy the three `duckies.vim` files into the matching dirs under `~/.config/nvim/`;
   filetype detection and highlighting then load automatically. Status markers render
-  white-on-red (override with `hi heraldStatus …`).
+  white-on-red (override with `hi duckiesStatus …`).
 - **VS Code** — `editors/vscode/` (a TextMate-grammar extension; colors follow your
   theme). See its `README.md` to install from source or package a `.vsix`.
 
@@ -569,12 +583,12 @@ that matches `herald-aliases.yaml` uses the mapped path. See the aliases section
 
 - Permissions: launched Claudes inherit your global bypass setting
   (`skipDangerousModePermissionPrompt`); the supervisor does nothing about them.
-- Identity: each Claude launches with `HERALD_LABEL`/`HERALD_STATE` exported; the
+- Identity: each Claude launches with `DUCKIES_LABEL`/`DUCKIES_STATE` exported; the
   hooks inherit these and write `state/<label>.json`, which the loop reads (using
   the file's mtime as the event time).
 - Missing `~/_dev/<label>` ⇒ the session is annotated `[NO DIR …]` and skipped.
 - The loop is the sole writer of markers; it computes changes, writes each file,
-  then runs tmux actions, and defers if you edit any `.herald` file mid-tick.
+  then runs tmux actions, and defers if you edit any `.dk` file mid-tick.
 - A label appearing in multiple files (or twice in one) is merged into a single queue,
   its rows concatenated in filename order; each marker writes back to its own file, and
   session-level state (dir, `[NO DIR …]`, a header `!`) comes from the first file.
@@ -584,13 +598,14 @@ that matches `herald-aliases.yaml` uses the mapped path. See the aliases section
   so the prompt lands in the **same conversation**, not a fresh one. `/resume`-ing a different
   conversation inside the pane is followed automatically (the next hook reports the new id).
   Deleting the whole session block (a teardown) drops the tracked id, so re-adding it starts
-  fresh. Only applies to `claude` agents; a custom `HERALD_AGENT_CMD` launches as-is.
+  fresh. Only applies to `claude` agents; a custom `DUCKIES_AGENT_CMD` launches as-is.
 
-## Repo aliases (`herald-aliases.yaml`)
+## Repo aliases (`~/.config/duckies/aliases.yaml`)
 
-Optional. A YAML map of `label: path`, so a header in a `.herald` file can be a
+Optional. A YAML map of `label: path`, so a header in a `.dk` file can be a
 short label instead of a full path. `~` expands to your home dir; the label
-becomes the tmux session name. See `herald-aliases.example.yaml`.
+becomes the tmux session name. Copy `duckies-aliases.example.yaml` to
+`~/.config/duckies/aliases.yaml` to start.
 
 ```yaml
 moonbase: ~/projects/moonbase
@@ -602,7 +617,7 @@ header that isn't a listed alias falls back to the path / bare-name rules above.
 
 ### Per-repo worktree setup
 
-Give an alias the **object form** to run setup when a [worktree](#the-herald-files) of that
+Give an alias the **object form** to run setup when a [worktree](#the-duckies-files) of that
 repo is first created (right after `git worktree add`; inherited by nested worktrees):
 
 ```yaml
@@ -621,10 +636,11 @@ webapp:
 so you can watch them and they get that shell's full env (PATH, asdf/nvm/direnv). Both are
 skipped in `--dry-run`. Queued `$commands` wait out the boot grace, so they land after setup.
 
-## Macros (`herald-macros.yaml`)
+## Macros (`~/.config/duckies/macros.yaml`)
 
 Optional. A YAML map of `name: |<multiline block>`, so a `@name` line on its own in a
-`.herald` file runs a reusable block of rows. See `herald-macros.example.yaml`.
+`.dk` file runs a reusable block of rows. Copy `duckies-macros.example.yaml` to
+`~/.config/duckies/macros.yaml` to start.
 
 ```yaml
 ship: |
@@ -643,7 +659,7 @@ core-iac
 		[EXECUTING]     ← one overall marker: [EXECUTING] while any step runs, [DONE] when all finish
 ```
 
-Steps run **bottom-to-top**, like every herald queue — the block's **last** line runs
+Steps run **bottom-to-top**, like every duckies queue — the block's **last** line runs
 first (put the setup command at the bottom, the follow-up prompt above it). Only a single
 marker is written — the macro is tracked as a whole, not row by row (the step cursor lives
 in the controller runtime, so it resumes mid-macro across ticks and restarts). A body line
@@ -666,13 +682,13 @@ core-iac
 spaces), `{*}` is all of them space-joined, and a missing one expands blank. Braces are
 used (not `$1`) so a placeholder never clashes with a `$2`/`:2` lane sigil inside the block.
 
-## Widgets (`herald-widgets.yaml`)
+## Widgets (`~/.config/duckies/widgets.yaml`)
 
 Optional. A **status display**, defined like a macro but with a **list of commands** and
-a refresh **interval**. A `&name` line on its own in a `.herald` block runs those commands and
+a refresh **interval**. A `&name` line on its own in a `.dk` block runs those commands and
 mirrors their combined stdout back into the file, indented below the line as `| `-prefixed rows.
 A single `&` runs the commands **once** (a one-shot capture); doubling the sigil to `&&` makes it
-**live** — herald reruns it every `interval` ms:
+**live** — duckies reruns it every `interval` ms:
 
 ```yaml
 pr:
@@ -707,11 +723,11 @@ whatever the gate would otherwise say, and the `!` is consumed (like a `!` on a 
 kick a stale one-shot without deleting and re-adding it.
 
 **Arguments** work exactly like macros: `&pr 2500` (or `&&pr 2500`) fills `{0}`/`{*}` in the commands. The
-widgets file is per-machine (gitignored), like `herald-aliases.yaml` / `herald-macros.yaml`.
+widgets file is per-machine, like `~/.config/duckies/aliases.yaml` / `macros.yaml`.
 
-## HERALD directives
+## DUCKIES directives
 
-A line starting with **`HERALD:`** asks a **background Claude to edit the `.herald` files
+A line starting with **`DUCKIES:`** asks a **background Claude to edit the `.dk` files
 themselves** — a self-referential meta-command for tidying and reshaping the control files without
 leaving your editor. It's the one line whose "work" is the dashboard, not a repo.
 
@@ -722,19 +738,19 @@ moonbase
 	feature-x
 		: risky refactor
 			[DONE]
-	HERALD: remove every idle lane here
+	DUCKIES: remove every idle lane here
 ```
 
-When herald sees a new `HERALD:` line it spawns a **visible tmux window** running `claude`, told
+When duckies sees a new `DUCKIES:` line it spawns a **visible tmux window** running `claude`, told
 **where the line is** — the file and line number and the session block it sits under — so words like
-*here*, *this*, or *this worktree* resolve. The window lives in a dedicated **`__herald-agent`**
+*here*, *this*, or *this worktree* resolve. The window lives in a dedicated **`__duckies-agent`**
 tmux session (one window per running directive); the agent's cwd is a dedicated **agent directory**
-whose `CLAUDE.md` explains the `.herald` format and the task contract, with the control dir added so
-it can edit the files. It does the edit, then herald mirrors its `-> ` summary just below the
+whose `CLAUDE.md` explains the `.dk` format and the task contract, with the control dir added so
+it can edit the files. It does the edit, then duckies mirrors its `-> ` summary just below the
 directive — exactly like a finished prompt:
 
 ```
-	HERALD: remove every idle lane here
+	DUCKIES: remove every idle lane here
 		-> removed 2 idle lanes
 ```
 
@@ -743,24 +759,24 @@ is there — **delete the note to run it again** (just like deleting a `[DONE]` 
 things you might write:
 
 ```
-HERALD: move this worktree to a new file this-worktree.herald
-HERALD: remove every idle lane here
-HERALD: remove low-importance commands and prompts here that are already processed
+DUCKIES: move this worktree to a new file this-worktree.dk
+DUCKIES: remove every idle lane here
+DUCKIES: remove low-importance commands and prompts here that are already processed
 ```
 
-**The window stays open.** After the directive finishes, its `__herald-agent` window is **kept
-alive as a live conversation** — switch to it (`!HERALD:`, below) and keep prompting the same agent.
-It's torn down only once it's sat **idle for an hour** (`HERALD_AGENT_IDLE_MS`); any new prompt in
-the window resets that timer. Deleting the `HERALD:` line also tears its window down at once.
+**The window stays open.** After the directive finishes, its `__duckies-agent` window is **kept
+alive as a live conversation** — switch to it (`!DUCKIES:`, below) and keep prompting the same agent.
+It's torn down only once it's sat **idle for an hour** (`DUCKIES_AGENT_IDLE_MS`); any new prompt in
+the window resets that timer. Deleting the `DUCKIES:` line also tears its window down at once.
 
-Prefix a **`!`** (`!HERALD: …`) to **switch to the agent's window** as soon as it's up, so you can
+Prefix a **`!`** (`!DUCKIES: …`) to **switch to the agent's window** as soon as it's up, so you can
 watch it work — the eager cousin of a queued reveal. The `!` is consumed (stripped) once it fires.
 
 A directive can sit **anywhere** — indented under a session/worktree (so *here*/*this worktree*
 resolve to that block), or at **column 0** as a top-level, file-wide directive:
 
 ```
-HERALD: sort the sessions and drop every finished block
+DUCKIES: sort the sessions and drop every finished block
 	-> sorted; dropped 4 done blocks
 
 app
@@ -768,14 +784,14 @@ app
 ```
 
 A top-level directive's agent window and state are keyed by the **control file's name** (e.g.
-`app.herald` → `app`); its `-> ` note lands one tab in, just below the line.
+`app.dk` → `app`); its `-> ` note lands one tab in, just below the line.
 
 Notes:
 
 - It's **not a queue item**: it never joins a session's prompt/command queue or blocks a lane, and a
-  block that holds *only* a `HERALD:` line doesn't spawn that session — the agent runs in its own
-  `__herald-agent` window regardless.
-- `HERALD:` is **case-sensitive**, so ordinary prose (or a `herald:` in a prompt body) never trips it.
+  block that holds *only* a `DUCKIES:` line doesn't spawn that session — the agent runs in its own
+  `__duckies-agent` window regardless.
+- `DUCKIES:` is **case-sensitive**, so ordinary prose (or a `duckies:` in a prompt body) never trips it.
 - The agent runs with `--permission-mode bypassPermissions` by default (it can't stop to answer
   approval prompts). It acts on your control files autonomously — keep directives scoped to
   file-tidying, which is what its `CLAUDE.md` steers it toward. See the env overrides to change the
@@ -783,34 +799,39 @@ Notes:
 
 ## Env overrides
 
-- `HERALD_DIR` — scan a different directory for `*.herald` files instead of the repo dir.
-- `HERALD_FILE` — single-file mode: watch exactly this one file (ignores the `*.herald` scan).
-- `HERALD_ALIASES` — read aliases from a different file instead of `./herald-aliases.yaml`.
-- `HERALD_MACROS` — read macros from a different file instead of `./herald-macros.yaml`.
-- `HERALD_WIDGETS` — read widgets from a different file instead of `./herald-widgets.yaml`.
-- `HERALD_DEV_DIR` — where a bare session name resolves (`<dir>/<name>`); default `~/_dev`.
-- `HERALD_AGENT_CMD` — the command launched in each claude pane; default `claude` (point it at
-  a wrapper or a different agent CLI). Also used for the `HERALD:` agent window.
-- `HERALD_AGENT_DIR` — cwd (and `CLAUDE.md` location) for the `HERALD:` agent; default `./agent`.
-- `HERALD_AGENT_PERMISSION_MODE` — the `HERALD:` agent's `--permission-mode`; default
+- `DUCKIES_DIR` — scan a different directory for `*.dk` files instead of `~/.config/duckies/duckspaces`.
+- `DUCKIES_FILE` — single-file mode: watch exactly this one file (ignores the `*.dk` scan).
+- `DUCKIES_CONFIG_DIR` — where aliases/macros/widgets are read from; default `~/.config/duckies`.
+- `DUCKIES_ALIASES` — read aliases from a different file instead of `~/.config/duckies/aliases.yaml`.
+- `DUCKIES_MACROS` — read macros from a different file instead of `~/.config/duckies/macros.yaml`.
+- `DUCKIES_WIDGETS` — read widgets from a different file instead of `~/.config/duckies/widgets.yaml`.
+- `DUCKIES_DEV_DIR` — where a bare session name resolves (`<dir>/<name>`); default `~/_dev`.
+- `DUCKIES_AGENT_CMD` — the command launched in each claude pane; default `claude` (point it at
+  a wrapper or a different agent CLI). Also used for the `DUCKIES:` agent window.
+- `DUCKIES_AGENT_DIR` — cwd (and `CLAUDE.md` location) for the `DUCKIES:` agent; default `./agent`.
+- `DUCKIES_AGENT_PERMISSION_MODE` — the `DUCKIES:` agent's `--permission-mode`; default
   `bypassPermissions` (it can't stop to answer approval prompts).
-- `HERALD_AGENT_MODEL` — optional `--model` for the `HERALD:` agent; default: the CLI's own default.
-- `HERALD_AGENT_IDLE_MS` — how long a finished `HERALD:` agent window is kept alive before it's torn
+- `DUCKIES_AGENT_MODEL` — optional `--model` for the `DUCKIES:` agent; default: the CLI's own default.
+- `DUCKIES_AGENT_IDLE_MS` — how long a finished `DUCKIES:` agent window is kept alive before it's torn
   down for inactivity; any new prompt in it resets the timer (default 3600000 = 1h).
-- `HERALD_TERM_APP` — macOS only, opt-in: the terminal app to bring to the foreground on a
+- `DUCKIES_TERM_APP` — macOS only, opt-in: the terminal app to bring to the foreground on a
   `show`/`!` (e.g. `WezTerm`, `iTerm`, `Terminal`). Unset ⇒ no app foregrounding (the tmux
   client still switches). Ignored off macOS.
-- `HERALD_READY_MS` — boot grace before the first prompt is sent (default 6000).
+- `DUCKIES_READY_MS` — boot grace before the first prompt is sent (default 6000).
+- `DUCKIES_TUI` — set to `0` to disable the interactive supervisor menu + log coloring (plain log only).
+  Also auto-disabled when stdout isn't a TTY.
+- `DUCKIES_EDITOR` — editor the supervisor menu opens config/`.dk` files with; default
+  `$VISUAL` / `$EDITOR` / `vi`.
 - `TYPESAFE_API_KEY` — enables the Jev attention check: when a Claude turn ends cleanly, its final
   message is judged by [TypeSafe](https://typesafe.ai)'s Jev model, and if it reads as *waiting on
   you* (a question, follow-ups pending a go-ahead, a blocked/needs-a-decision ending) the lane is
   flagged `[NEEDS ATTENTION]` and held instead of draining to `[DONE]`. A missing key, an error, or
   a timeout falls back to plain `[DONE]`, so an outage never stalls the queue.
-- `HERALD_JEV_ATTENTION` — set to `0` to disable the Jev attention check even when a key is present.
-- `HERALD_JEV_THRESHOLD` — yes-probability cutoff for the flag (default `0.6`; higher ⇒ fewer flags).
-- `HERALD_JEV_TIMEOUT_MS` — how long the Jev call may take before falling back to `[DONE]` (default 6000).
-- `HERALD_JEV_MODEL` — optionally pin a Jev model; default: the SDK's own default.
-- `HERALD_SUBLIME_DIR` — (setup only) override Sublime's `Packages/User` dir the syntax is
+- `DUCKIES_JEV_ATTENTION` — set to `0` to disable the Jev attention check even when a key is present.
+- `DUCKIES_JEV_THRESHOLD` — yes-probability cutoff for the flag (default `0.6`; higher ⇒ fewer flags).
+- `DUCKIES_JEV_TIMEOUT_MS` — how long the Jev call may take before falling back to `[DONE]` (default 6000).
+- `DUCKIES_JEV_MODEL` — optionally pin a Jev model; default: the SDK's own default.
+- `DUCKIES_SUBLIME_DIR` — (setup only) override Sublime's `Packages/User` dir the syntax is
   copied into.
 
 ## Test

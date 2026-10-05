@@ -6,30 +6,30 @@ import { fileURLToPath } from 'node:url'
 import { fire } from '@jgjp/fire'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const hookPath = resolve(here, 'herald-hook')
-const fishHookPath = resolve(here, 'herald-fish.fish')
+const hookPath = resolve(here, 'duckies-hook')
+const fishHookPath = resolve(here, 'duckies-fish.fish')
 const fishConfDir = resolve(homedir(), '.config', 'fish', 'conf.d')
-const fishLinkPath = resolve(fishConfDir, 'herald.fish')
-const bashHookPath = resolve(here, 'herald-bash.sh')
+const fishLinkPath = resolve(fishConfDir, 'duckies.fish')
+const bashHookPath = resolve(here, 'duckies-bash.sh')
 const bashrcPath = resolve(homedir(), '.bashrc')
-const zshHookPath = resolve(here, 'herald-zsh.sh')
+const zshHookPath = resolve(here, 'duckies-zsh.sh')
 const zshrcPath = resolve(homedir(), '.zshrc')
 const settingsPath = resolve(homedir(), '.claude', 'settings.json')
-// Sublime's `Packages/User` dir differs per OS. `HERALD_SUBLIME_DIR` overrides it.
+// Sublime's `Packages/User` dir differs per OS. `DUCKIES_SUBLIME_DIR` overrides it.
 const sublimeUserDir = resolve(
-	process.env.HERALD_SUBLIME_DIR ??
+	process.env.DUCKIES_SUBLIME_DIR ??
 		(platform() === 'darwin'
 			? join(homedir(), 'Library', 'Application Support', 'Sublime Text', 'Packages', 'User')
 			: platform() === 'win32'
 				? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'Sublime Text', 'Packages', 'User')
 				: join(homedir(), '.config', 'sublime-text', 'Packages', 'User')),
 )
-// The Sublime assets to install: the `.herald` syntax, its companion color scheme (which
+// The Sublime assets to install: the `.dk` syntax, its companion color scheme (which
 // carries the backgrounds a syntax scope can't set — the [EXECUTING] marker and macro calls),
 // the syntax-specific settings (turns spell check off for these control files), the reveal
-// plugin (adds a `!` to the current line and saves — a one-click "show this pane now"), and
-// its command-palette entry.
-const sublimeFiles = ['herald.sublime-syntax', 'herald.sublime-color-scheme', 'herald.sublime-settings', 'herald_reveal.py', 'herald.sublime-commands']
+// plugin (adds a `!` to the current line and saves — a one-click "show this pane now"), its
+// command-palette entry, and the comment preferences (the `# ` token Toggle Comment uses).
+const sublimeFiles = ['duckies.sublime-syntax', 'duckies.sublime-color-scheme', 'duckies.sublime-settings', 'duckies_reveal.py', 'duckies.sublime-commands', 'duckies.tmPreferences']
 
 // Symlink the fish_postexec hook into fish's conf.d (fish auto-loads it). Repo
 // file stays the source of truth.
@@ -48,7 +48,7 @@ function installFishHook() {
 	console.log(`fish: linked hook ${fishLinkPath} -> ${fishHookPath}`)
 }
 
-// Copy the .herald Sublime assets (syntax + color scheme) into Sublime's User package dir
+// Copy the .dk Sublime assets (syntax + color scheme) into Sublime's User package dir
 // (Sublime auto-loads any *.sublime-syntax / *.sublime-color-scheme there). Unlike the shell
 // hooks we copy rather than symlink: Sublime's package scanner doesn't follow symlinks, so a
 // link is never loaded. The repo files stay the source of truth — re-run setup to propagate
@@ -83,10 +83,10 @@ function installRcHook(shell: string, rcPath: string, shellHookPath: string) {
 		console.log(`${shell}: hook already sourced in ${rcPath}`)
 		return
 	}
-	const backup = `${rcPath}.herald-bak`
+	const backup = `${rcPath}.dk-bak`
 	if (!existsSync(backup)) writeFileSync(backup, existing)
 	const sep = existing.length && !existing.endsWith('\n') ? '\n' : ''
-	appendFileSync(rcPath, `${sep}\n# herald command-completion hook\nsource "${shellHookPath}"\n`)
+	appendFileSync(rcPath, `${sep}\n# duckies command-completion hook\nsource "${shellHookPath}"\n`)
 	console.log(`${shell}: sourced hook in ${rcPath}`)
 }
 
@@ -95,7 +95,7 @@ type HookEntry = { hooks: { type: string; command: string }[] }
 
 // Returns true if any command in the event's entries already invokes our hook.
 const alreadyInstalled = (entries: HookEntry[] | undefined): boolean =>
-	(entries ?? []).some((e) => e.hooks?.some((h) => h.command.includes('herald-hook')))
+	(entries ?? []).some((e) => e.hooks?.some((h) => h.command.includes('duckies-hook')))
 
 void fire(async () => {
 	// 1. Make the hook executable and ensure the state dir exists.
@@ -106,15 +106,15 @@ void fire(async () => {
 	console.log(`state dir ready: ${stateDir}`)
 
 	// 1b. Install a command-completion hook for each shell so the session's shell
-	//     window reports when a `$command` has exited (see herald-<shell>.*). Each
-	//     hook self-guards on HERALD_SHELL, so only the shell actually running the
+	//     window reports when a `$command` has exited (see duckies-<shell>.*). Each
+	//     hook self-guards on DUCKIES_SHELL, so only the shell actually running the
 	//     window activates it — no need to know that shell in advance. Shells whose
 	//     config isn't present are skipped.
 	installFishHook()
 	installRcHook('bash', bashrcPath, bashHookPath)
 	installRcHook('zsh', zshrcPath, zshHookPath)
 
-	// 1c. Symlink the Sublime Text syntax for `.herald` files (skipped if Sublime
+	// 1c. Symlink the Sublime Text syntax for `.dk` files (skipped if Sublime
 	//     isn't set up on this machine).
 	installSublimeSyntax()
 
@@ -133,19 +133,19 @@ void fire(async () => {
 	for (const event of ['Stop', 'Notification', 'UserPromptSubmit'] as const) {
 		settings.hooks[event] ??= []
 		if (alreadyInstalled(settings.hooks[event])) {
-			console.log(`${event}: herald-hook already installed, skipping`)
+			console.log(`${event}: duckies-hook already installed, skipping`)
 			continue
 		}
 		settings.hooks[event].push({
 			hooks: [{ type: 'command', command: `${hookPath} ${event}` }],
 		})
-		console.log(`${event}: added herald-hook`)
+		console.log(`${event}: added duckies-hook`)
 		changed = true
 	}
 
 	if (changed) {
 		// Back up once before the first modification.
-		const backup = `${settingsPath}.herald-bak`
+		const backup = `${settingsPath}.dk-bak`
 		if (!existsSync(backup)) writeFileSync(backup, readFileSync(settingsPath))
 		writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`)
 		console.log(`updated ${settingsPath} (backup at ${backup})`)

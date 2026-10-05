@@ -19,35 +19,39 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fire } from '@jgjp/fire'
 import { $, sleep, YAML } from 'zx'
+import { startDashboard } from './duckies-menu'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-// The controller merges every `*.herald` file in the control dir (default: the repo
-// dir) into one logical control — each file is an independent slice of sessions and
-// is rewritten in place. `HERALD_DIR` overrides the dir; `HERALD_FILE` forces
+// Per-machine config (aliases/macros/widgets, plus the `duckspaces` control dir) lives here by
+// default. `DUCKIES_CONFIG_DIR` overrides the dir; each file also has its own env override below.
+const CONFIG_DIR = process.env.DUCKIES_CONFIG_DIR ? resolve(process.env.DUCKIES_CONFIG_DIR) : join(homedir(), '.config', 'duckies')
+// The controller merges every `*.dk` file in the control dir (default: `~/.config/duckies/
+// duckspaces`) into one logical control — each file is an independent slice of sessions and
+// is rewritten in place. `DUCKIES_DIR` overrides the dir; `DUCKIES_FILE` forces
 // single-file mode (one explicit file, mainly for tests/one-offs).
-export const CONTROL_DIR = process.env.HERALD_DIR ? resolve(process.env.HERALD_DIR) : HERE
-const SINGLE_FILE = process.env.HERALD_FILE ? resolve(process.env.HERALD_FILE) : null
-const CONTROL_EXT = '.herald'
-// Optional YAML file of `label: /path/to/repo` aliases, so a header in a `.herald`
+export const CONTROL_DIR = process.env.DUCKIES_DIR ? resolve(process.env.DUCKIES_DIR) : join(CONFIG_DIR, 'duckspaces')
+const SINGLE_FILE = process.env.DUCKIES_FILE ? resolve(process.env.DUCKIES_FILE) : null
+const CONTROL_EXT = '.dk'
+// Optional YAML file of `label: /path/to/repo` aliases, so a header in a `.dk`
 // file can be a short label instead of a full path.
-const ALIASES_FILE = process.env.HERALD_ALIASES ? resolve(process.env.HERALD_ALIASES) : join(HERE, 'herald-aliases.yaml')
+const ALIASES_FILE = process.env.DUCKIES_ALIASES ? resolve(process.env.DUCKIES_ALIASES) : join(CONFIG_DIR, 'aliases.yaml')
 const STATE = join(HERE, 'state')
 const RT_PATH = join(STATE, 'controller.json')
 const LOCK = join(STATE, 'supervisor.lock')
 // Self-restart sentinel: when this file appears, the loop consumes it and exits with RESTART_EXIT.
-// `nr start` runs under herald-run.ts, which relaunches on that code — so `tsx` re-reads the
+// `nr start` runs under duckies-run.ts, which relaunches on that code — so `tsx` re-reads the
 // (edited) source and the supervisor comes back on new code, in the same terminal, without a manual
-// restart. `nr restart` writes the sentinel (see herald-restart.ts); nothing new is ever spawned.
+// restart. `nr restart` writes the sentinel (see duckies-restart.ts); nothing new is ever spawned.
 const RESTART_FILE = join(STATE, 'restart')
 const RESTART_EXIT = 97
 // Where a bare session name (not a path or alias) resolves: `<DEV_DIR>/<name>`.
-// `HERALD_DEV_DIR` overrides it; defaults to `~/_dev`.
-const DEV_DIR = process.env.HERALD_DEV_DIR ? resolve(process.env.HERALD_DEV_DIR) : join(homedir(), '_dev')
-// The command typed into a fresh claude pane to launch the agent. `HERALD_AGENT_CMD`
+// `DUCKIES_DEV_DIR` overrides it; defaults to `~/_dev`.
+const DEV_DIR = process.env.DUCKIES_DEV_DIR ? resolve(process.env.DUCKIES_DEV_DIR) : join(homedir(), '_dev')
+// The command typed into a fresh claude pane to launch the agent. `DUCKIES_AGENT_CMD`
 // overrides it (e.g. a wrapper script or a different agent CLI).
-const AGENT_CMD = process.env.HERALD_AGENT_CMD || 'claude'
-// Instruction folded into every herald-launched claude's system prompt: end each turn with a
-// one-line `-> ` summary, which the note pass mirrors into the `.herald` file below the
+const AGENT_CMD = process.env.DUCKIES_AGENT_CMD || 'claude'
+// Instruction folded into every duckies-launched claude's system prompt: end each turn with a
+// one-line `-> ` summary, which the note pass mirrors into the `.dk` file below the
 // finished prompt. Delivered via a system-prompt *file* (see launchCmd), not `--append-system-
 // prompt`, because that flag can't coexist with the `--append-system-prompt-file` a wrapping
 // `claude` may already pass — and repeated `-file` flags are last-wins, not merged.
@@ -55,13 +59,13 @@ const NOTE_PROMPT =
 	'When you finish responding to a prompt in this session, end your final message with a single line beginning with -> that states the actual useful outcome of the turn — the concrete result, or, when you were asked a question, the answer itself (NOT a description of what you did). Keep it terse (roughly 3-12 words) and plain text (no backticks, code, or long paths — a bare filename is fine). Good: "-> yes, all 3 CI checks are green"; "-> added /healthz + a passing test"; "-> the leak is in cacheWarm(), not the router". Bad (meta, omits the answer): "-> answered the question"; "-> investigated the issue".'
 // A base system-prompt file to fold in, so a `--append-system-prompt-file` already on the
 // launch (e.g. a personal prompt added by a shell `claude` wrapper) isn't lost to last-wins:
-// herald's file must be a superset. Defaults to the common fish-wrapper path; override or set
+// duckies's file must be a superset. Defaults to the common fish-wrapper path; override or set
 // empty to fold in nothing. Rebuilt each launch, so edits to it apply on the next spawn.
-const BASE_SYSTEM_PROMPT_FILE = process.env.HERALD_SYSTEM_PROMPT_FILE ?? join(homedir(), '.config', 'fish', 'claude-system-prompt')
+const BASE_SYSTEM_PROMPT_FILE = process.env.DUCKIES_SYSTEM_PROMPT_FILE ?? join(homedir(), '.config', 'fish', 'claude-system-prompt')
 const SYSTEM_PROMPT_FILE = join(STATE, 'system-prompt')
 const AGENT_IS_CLAUDE = /(^|[\s/])claude(\s|$)/.test(AGENT_CMD)
 // (Re)build the combined system-prompt file (base + note instruction) and return its path.
-// Shared by the interactive launch line and the headless HERALD agent so both fold in the
+// Shared by the interactive launch line and the headless DUCKIES agent so both fold in the
 // user's base prompt and the `-> ` summary instruction.
 function buildSystemPromptFile(): string {
 	let base = ''
@@ -82,59 +86,62 @@ function buildSystemPromptFile(): string {
 export const resumeFlag = (resumeId: string | undefined, isClaude = true): string =>
 	isClaude && resumeId && /^[0-9a-f-]{8,}$/i.test(resumeId) ? ` --resume ${resumeId}` : ''
 // Build the combined system-prompt file (base + note instruction) and return the launch line.
-// Non-claude agents (a custom HERALD_AGENT_CMD) launch as-is — the flag wouldn't exist. `resumeId`
+// Non-claude agents (a custom DUCKIES_AGENT_CMD) launch as-is — the flag wouldn't exist. `resumeId`
 // (a tracked conversation id for this lane) reopens that conversation instead of starting fresh.
 function launchCmd(resumeId?: string): string {
 	if (!AGENT_IS_CLAUDE) return AGENT_CMD
 	return `${AGENT_CMD}${resumeFlag(resumeId)} --append-system-prompt-file '${buildSystemPromptFile()}'`
 }
-// HERALD directives: a `HERALD: <prompt>` line in a control file asks a background claude — run in
-// the agent dir (its CLAUDE.md explains the `.herald` format), with the control dir added so it can
-// edit the files — to act on the `.herald` file(s) themselves (e.g. "remove every idle lane here").
+// DUCKIES directives: a `DUCKIES: <prompt>` line in a control file asks a background claude — run in
+// the agent dir (its CLAUDE.md explains the `.dk` format), with the control dir added so it can
+// edit the files — to act on the `.dk` file(s) themselves (e.g. "remove every idle lane here").
 // Unlike a normal prompt it never joins the queue; it runs in its own visible tmux window inside a
-// dedicated `__herald-agent` session (revealable with `!HERALD:`). After it finishes the directive
+// dedicated `__duckies-agent` session (revealable with `!DUCKIES:`). After it finishes the directive
 // its window is KEPT ALIVE as a live conversation you can keep prompting; it's only torn down once
-// idle (no hook activity) for `HERALD_AGENT_IDLE_MS` — a fresh prompt in the window resets that.
-// `HERALD_AGENT_DIR` overrides the cwd/CLAUDE.md dir; `HERALD_AGENT_PERMISSION_MODE` the permission
-// mode (default bypassPermissions — the run can't answer prompts); `HERALD_AGENT_MODEL` an optional model.
-const AGENT_DIR = process.env.HERALD_AGENT_DIR ? resolve(process.env.HERALD_AGENT_DIR) : join(HERE, 'agent')
-const HERALD_AGENT_PERM = process.env.HERALD_AGENT_PERMISSION_MODE || 'bypassPermissions'
-const HERALD_AGENT_MODEL = process.env.HERALD_AGENT_MODEL || ''
-// How long a HERALD agent window may sit idle (no Stop/prompt hook activity) before it's torn down.
-const HERALD_AGENT_IDLE_MS = Number(process.env.HERALD_AGENT_IDLE_MS) || 60 * 60 * 1000
-// The dedicated tmux session (`__herald-agent`) that holds one window per in-flight HERALD agent.
-// Reserved (below) so herald's reaper never kills it; it disappears on its own once its last agent
-// window is torn down. Kept out of `~/_dev` name-resolution — it's never a real `.herald` session.
-const AGENT_SESSION_LABEL = 'herald-agent'
+// idle (no hook activity) for `DUCKIES_AGENT_IDLE_MS` — a fresh prompt in the window resets that.
+// `DUCKIES_AGENT_DIR` overrides the cwd/CLAUDE.md dir; `DUCKIES_AGENT_PERMISSION_MODE` the permission
+// mode (default bypassPermissions — the run can't answer prompts); `DUCKIES_AGENT_MODEL` an optional model.
+const AGENT_DIR = process.env.DUCKIES_AGENT_DIR ? resolve(process.env.DUCKIES_AGENT_DIR) : join(HERE, 'agent')
+const DUCKIES_AGENT_PERM = process.env.DUCKIES_AGENT_PERMISSION_MODE || 'bypassPermissions'
+const DUCKIES_AGENT_MODEL = process.env.DUCKIES_AGENT_MODEL || ''
+// How long a DUCKIES agent window may sit idle (no Stop/prompt hook activity) before it's torn down.
+const DUCKIES_AGENT_IDLE_MS = Number(process.env.DUCKIES_AGENT_IDLE_MS) || 60 * 60 * 1000
+// The dedicated tmux session (`__duckies-agent`) that holds one window per in-flight DUCKIES agent.
+// Reserved (below) so duckies's reaper never kills it; it disappears on its own once its last agent
+// window is torn down. Kept out of `~/_dev` name-resolution — it's never a real `.dk` session.
+const AGENT_SESSION_LABEL = 'duckies-agent'
 // macOS only: the terminal app to bring to the foreground on a `show`/`!`, so a reveal
-// surfaces the window even under another app. Opt-in via `HERALD_TERM_APP` (e.g. `WezTerm`,
+// surfaces the window even under another app. Opt-in via `DUCKIES_TERM_APP` (e.g. `WezTerm`,
 // `iTerm`, `Terminal`); unset ⇒ no app foregrounding (the tmux client still switches).
-const TERM_APP = process.env.HERALD_TERM_APP
-// Jev-driven [NEEDS ATTENTION]: when a claude turn ends cleanly, herald normally latches [DONE].
+const TERM_APP = process.env.DUCKIES_TERM_APP || process.env.HERALD_TERM_APP
+// Jev-driven [NEEDS ATTENTION]: when a claude turn ends cleanly, duckies normally latches [DONE].
 // With this on, the turn's final assistant message is first judged by TypeSafe's Jev model — if it
 // reads as "waiting on the human" (a question, follow-ups pending a go-ahead, a blocked/needs-a-
 // decision ending) the lane is flagged [NEEDS ATTENTION] and held instead of draining on. Enabled
 // only when `TYPESAFE_API_KEY` is set (the SDK reads it) and not explicitly disabled; a missing key,
 // an error, or a timeout falls back to plain [DONE] so a Jev outage never stalls the queue.
-// `HERALD_JEV_THRESHOLD` is the yes-probability cutoff (higher ⇒ fewer flags); `HERALD_JEV_TIMEOUT_MS`
-// bounds the call; `HERALD_JEV_MODEL` optionally pins a Jev model.
-const JEV_ATTENTION = !!process.env.TYPESAFE_API_KEY && process.env.HERALD_JEV_ATTENTION !== '0'
-const JEV_THRESHOLD = Number(process.env.HERALD_JEV_THRESHOLD) || 0.6
-const JEV_TIMEOUT_MS = Number(process.env.HERALD_JEV_TIMEOUT_MS) || 6000
-const JEV_MODEL = process.env.HERALD_JEV_MODEL || ''
+// `DUCKIES_JEV_THRESHOLD` is the yes-probability cutoff (higher ⇒ fewer flags); `DUCKIES_JEV_TIMEOUT_MS`
+// bounds the call; `DUCKIES_JEV_MODEL` optionally pins a Jev model.
+const JEV_ATTENTION = !!process.env.TYPESAFE_API_KEY && process.env.DUCKIES_JEV_ATTENTION !== '0'
+const JEV_THRESHOLD = Number(process.env.DUCKIES_JEV_THRESHOLD) || 0.6
+const JEV_TIMEOUT_MS = Number(process.env.DUCKIES_JEV_TIMEOUT_MS) || 6000
+const JEV_MODEL = process.env.DUCKIES_JEV_MODEL || ''
 // Labels the controller never manages (a blacklist). Empty by default.
 const RESERVED = new Set<string>([AGENT_SESSION_LABEL])
 const TICK_MS = 1000
 // How long to coalesce a burst of filesystem events from one save before waking the poll
 // loop early. Small enough that a `!` reveal reaches wezterm near-instantly, large enough to
-// fold an editor's write+rename into a single tick. `HERALD_WATCH_MS=0` disables the watcher
+// fold an editor's write+rename into a single tick. `DUCKIES_WATCH_MS=0` disables the watcher
 // (falling back to pure TICK_MS polling).
-const WATCH_MS = process.env.HERALD_WATCH_MS !== undefined ? Number(process.env.HERALD_WATCH_MS) : 40
+const WATCH_MS = process.env.DUCKIES_WATCH_MS !== undefined ? Number(process.env.DUCKIES_WATCH_MS) : 40
 // Grace period for a freshly launched claude to boot before we send its first prompt.
-const READY_MS = Number(process.env.HERALD_READY_MS) || 6000
+const READY_MS = Number(process.env.DUCKIES_READY_MS) || 6000
 const DRY = process.argv.includes('--dry-run')
 
-const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`)
+// Set once the interactive dashboard is started (real run in a TTY). Until then — and in dry-run or
+// when disabled/non-TTY — `log` falls back to a plain timestamped console line.
+let dash: ReturnType<typeof startDashboard> | null = null
+const log = (m: string) => (dash ? dash.emit(m) : console.log(`${new Date().toISOString()} ${m}`))
 
 const expandHome = (p: string): string =>
 	p.startsWith('~') ? join(homedir(), p.slice(p[1] === '/' ? 2 : 1)) : p
@@ -188,9 +195,9 @@ export function loadAliases(): Aliases {
 	}
 }
 
-// Optional YAML file of `name: |<multiline block>` macros. A `@name` line in a `.herald`
+// Optional YAML file of `name: |<multiline block>` macros. A `@name` line in a `.dk`
 // file is one queue item that expands IN MEMORY to that block's steps (see macroSteps).
-const MACROS_FILE = process.env.HERALD_MACROS ? resolve(process.env.HERALD_MACROS) : join(HERE, 'herald-macros.yaml')
+const MACROS_FILE = process.env.DUCKIES_MACROS ? resolve(process.env.DUCKIES_MACROS) : join(CONFIG_DIR, 'macros.yaml')
 export type Macros = Record<string, string>
 
 // Load the `@name`→block macro map, tolerating a missing/empty/malformed file.
@@ -214,11 +221,11 @@ export interface MacroStep {
 }
 
 // Optional YAML file of widgets: `name: { interval: <ms>, commands: [<shell cmd>, …] }`. An
-// `&name` line in a `.herald` file is a status display — herald runs its commands and mirrors
+// `&name` line in a `.dk` file is a status display — duckies runs its commands and mirrors
 // their combined stdout back into the file as `| `-prefixed lines indented below the `&name` line.
 // A single `&` runs once; `&&` reruns every `interval` ms (live). Unlike a macro, a widget never
 // drains: it isn't a queue item.
-const WIDGETS_FILE = process.env.HERALD_WIDGETS ? resolve(process.env.HERALD_WIDGETS) : join(HERE, 'herald-widgets.yaml')
+const WIDGETS_FILE = process.env.DUCKIES_WIDGETS ? resolve(process.env.DUCKIES_WIDGETS) : join(CONFIG_DIR, 'widgets.yaml')
 export interface Widget {
 	interval: number
 	commands: string[]
@@ -227,7 +234,7 @@ export type Widgets = Record<string, Widget>
 const WIDGET_MIN_INTERVAL = 1000 // the tick floor — a shorter interval can only refresh per tick
 // Load the `&name`→widget map, tolerating a missing/empty/malformed file. A valid entry is an
 // object with a non-empty string-array `commands`; `interval` defaults to 10s and is floored at
-// the tick cadence (a widget can't refresh faster than herald ticks).
+// the tick cadence (a widget can't refresh faster than duckies ticks).
 export function loadWidgets(): Widgets {
 	try {
 		const parsed = YAML.parse(readFileSync(WIDGETS_FILE, 'utf8'))
@@ -250,7 +257,7 @@ export function loadWidgets(): Widgets {
 // IN MEMORY to a sequence of steps run one at a time, while the file keeps the `@name` line
 // and gets a single overall marker. `{0}`,`{1}`,… are the positional args (0-based;
 // quote-aware so `"two words"` is one arg), `{*}` is all of them space-joined, a missing one
-// is blank. Braces avoid clashing with herald's own `$N`/`:N` lane sigils. A name char must
+// is blank. Braces avoid clashing with duckies's own `$N`/`:N` lane sigils. A name char must
 // follow the `@`, so a body line like `@@@…` never matches.
 const MACRO_RE = /^([ \t]*)@([\w-]+)(?:[ \t]+(.*\S))?[ \t]*$/
 // A `&<name> [args…]` line (any indent) is a widget call — same shape as a macro call, but it
@@ -262,7 +269,7 @@ const macroArgs = (s: string): string[] => (s.match(/"[^"]*"|'[^']*'|\S+/g) ?? [
 const fillArgs = (text: string, args: string[]): string => text.replace(/\{\*\}/g, args.join(' ')).replace(/\{(\d+)\}/g, (_, d) => args[+d] ?? '')
 // Expand a macro body into steps, in RUN order: fill args, drop blank and `#` comment lines,
 // classify each remaining line as a `$`command or a prompt, and reverse so they run
-// bottom-to-top like every other herald queue (the body's last line runs first). A step's
+// bottom-to-top like every other duckies queue (the body's last line runs first). A step's
 // own lane sigil is ignored — the steps run in the macro item's own lane.
 export function macroSteps(body: string, args: string[]): MacroStep[] {
 	return body
@@ -399,9 +406,9 @@ interface Session {
 	// The `&name` widget calls in this session's block. Kept separate from `prompts` so the
 	// drain never touches them — a widget is a live display, not a queue item.
 	widgets: WidgetItem[]
-	// The `HERALD:` directives in this session's block. Kept separate from `prompts` for the same
+	// The `DUCKIES:` directives in this session's block. Kept separate from `prompts` for the same
 	// reason — they run a background agent on the files, never enter the queue or a tmux pane.
-	heralds: HeraldItem[]
+	duckies: DuckiesItem[]
 }
 
 // A parsed `&name [args]` line plus its current output. Single-line output renders inline on the
@@ -430,13 +437,13 @@ export interface WidgetItem {
 	hasOutput: boolean
 }
 
-// A parsed `HERALD: <directive>` line. Not a queue item and not a live display — a one-shot
-// request for a background headless claude to edit the `.herald` file(s). `directive` is the text
-// after `HERALD:`; `label`/`dir` name the session block it sits under (passed to the agent as
+// A parsed `DUCKIES: <directive>` line. Not a queue item and not a live display — a one-shot
+// request for a background headless claude to edit the `.dk` file(s). `directive` is the text
+// after `DUCKIES:`; `label`/`dir` name the session block it sits under (passed to the agent as
 // context so "here"/"this" resolve). `note` is an existing `-> ` summary directly below it: its
 // presence means the directive already ran (delete the note to re-run). `desiredNote` is the
 // summary to write below it this tick, once the agent finishes.
-export interface HeraldItem {
+export interface DuckiesItem {
 	directive: string
 	lineIdx: number
 	indent: string
@@ -445,13 +452,13 @@ export interface HeraldItem {
 	note: { text: string; lineIdx: number } | null
 	desiredNote?: string | null
 	// An `[EXECUTING]` marker directly below the directive while its background agent runs — the
-	// herald-pass analogue of a prompt's frontier marker. `marker` is one parsed from the file;
+	// duckies-pass analogue of a prompt's frontier marker. `marker` is one parsed from the file;
 	// `desiredKind` is what this tick wants there (EXECUTING while running, null once the `-> ` note
 	// lands). Only EXECUTING is ever placed: a finished directive is marked by its `-> ` note, not a
-	// `[DONE]`. buildHeraldOps reconciles the two.
+	// `[DONE]`. buildDuckiesOps reconciles the two.
 	marker?: { kind: Kind; lineIdx: number } | null
 	desiredKind?: Kind | null
-	// A leading `!` (`!HERALD: …`): reveal the agent's tmux window once it exists. Fires once
+	// A leading `!` (`!DUCKIES: …`): reveal the agent's tmux window once it exists. Fires once
 	// (`showNowFired`), then buildOps rewrites the line to `strippedLine` (without the `!`).
 	showNow?: boolean
 	showNowFired?: boolean
@@ -474,16 +481,16 @@ const CLEAR_RE = /^(%+)(\d*)$/
 // own indentation is preserved. The `|` and one optional following space are stripped; the
 // rest (incl. any further leading spaces) is the literal text. A bare `|` is a blank line.
 const CONT_RE = /^\|[ ]?/
-// A `-> ` line is a one-line summary herald mirrored below a finished prompt (see the note
+// A `-> ` line is a one-line summary duckies mirrored below a finished prompt (see the note
 // pass): inert (never runs, no marker), attached to the prompt above it. Recognised here so a
 // non-sigil indented line isn't misread as a worktree. The `->` and one optional space strip.
 const NOTE_RE = /^->[ ]?/
-// A `HERALD: <directive>` line (any indent, including column 0) is a meta-directive: herald runs a
-// background claude to act on the `.herald` file(s) themselves. Case-sensitive `HERALD:` so it never
+// A `DUCKIES: <directive>` line (any indent, including column 0) is a meta-directive: duckies runs a
+// background claude to act on the `.dk` file(s) themselves. Case-sensitive `DUCKIES:` so it never
 // clashes with prose in a prompt body. It never enters the queue — an indented one is collected on
-// its session (like widgets), a column-0 one in the file's top-level `heralds` list; either way its
+// its session (like widgets), a column-0 one in the file's top-level `duckies` list; either way its
 // completion is recorded by a `-> ` note written below it.
-const HERALD_RE = /^HERALD:[ \t]*/
+const DUCKIES_RE = /^DUCKIES:[ \t]*/
 // A sigil run of length `run` (e.g. `::` → 2) or an explicit `digits` suffix (which
 // wins) picks the 1-based lane. `prompt:`/plain sigils fall through to lane 1.
 const paneFromSigil = (run: string | undefined, digits: string | undefined): number => (digits ? Math.max(1, parseInt(digits, 10) || 1) : run ? run.length : 1)
@@ -492,14 +499,14 @@ const clearAttention = (s: Session) => {
 	if (isAttention(s.desiredSession)) s.desiredSession = null
 }
 
-export function parse(content: string, aliases: Aliases = {}, macros: Macros = {}, widgets: Widgets = {}): { lines: string[]; sessions: Session[]; heralds: HeraldItem[] } {
+export function parse(content: string, aliases: Aliases = {}, macros: Macros = {}, widgets: Widgets = {}): { lines: string[]; sessions: Session[]; duckies: DuckiesItem[] } {
 	const lines = content.split('\n')
 	// The whole file is the sessions region; keep your backlog/footer in other
 	// files. Blank lines are skipped, so nothing else is preserved verbatim.
 	const sessions: Session[] = []
-	// Top-level (column-0) `HERALD:` directives — not attached to any session. Collected here so a
+	// Top-level (column-0) `DUCKIES:` directives — not attached to any session. Collected here so a
 	// directive can sit anywhere in the file, not only indented under a repo/worktree.
-	const heralds: HeraldItem[] = []
+	const duckies: DuckiesItem[] = []
 	let cur: Session | null = null
 	// The prompt/command a deeper-indented line would continue. Set right after a `:`/`$`
 	// line, cleared by anything else (header, marker, barrier, blank-separated item).
@@ -507,9 +514,9 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 	// The widget a deeper `| ` line would extend as output. Set right after an `&name` line,
 	// cleared by anything that isn't one of its output lines (mirrors lastPrompt).
 	let lastWidget: WidgetItem | null = null
-	// The top-level `HERALD:` directive a following indented `-> ` note attaches to (it has no
-	// session container). Set right after a column-0 HERALD line, cleared by the next column-0 line.
-	let lastTopHerald: HeraldItem | null = null
+	// The top-level `DUCKIES:` directive a following indented `-> ` note attaches to (it has no
+	// session container). Set right after a column-0 DUCKIES line, cleared by the next column-0 line.
+	let lastTopDuckies: DuckiesItem | null = null
 	// The enclosing repo/worktree stack (by indent). Queue items attach to the deepest one
 	// they sit under; a non-sigil line opens a new worktree container. Reset per header.
 	let containers: { indent: number; session: Session }[] = []
@@ -527,7 +534,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		if (tabs.length === 0) {
 			lastPrompt = null
 			lastWidget = null
-			lastTopHerald = null
+			lastTopDuckies = null
 			// A column-0 `#` is a plain comment (it sits between sessions, so there is no
 			// queue to halt): ignored and preserved verbatim, like a blank line. It also
 			// closes the current session block, so an indented line beneath it (e.g. a
@@ -537,24 +544,24 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				containers = []
 				continue
 			}
-			// A column-0 `HERALD:` directive: a top-level meta-command (not under any session). Caught
-			// before the header / `<repo>:<worktree>` colon logic so the `:` in `HERALD:` isn't read as
+			// A column-0 `DUCKIES:` directive: a top-level meta-command (not under any session). Caught
+			// before the header / `<repo>:<worktree>` colon logic so the `:` in `DUCKIES:` isn't read as
 			// a worktree split. Like a comment it ends the current session block; its `-> ` note (an
-			// indented line right below) attaches via lastTopHerald in the `!cur` branch.
-			if (HERALD_RE.test(line.trim())) {
+			// indented line right below) attaches via lastTopDuckies in the `!cur` branch.
+			if (DUCKIES_RE.test(line.trim())) {
 				const t0 = line.trim()
-				const item: HeraldItem = {
-					directive: t0.replace(HERALD_RE, '').trim(),
+				const item: DuckiesItem = {
+					directive: t0.replace(DUCKIES_RE, '').trim(),
 					lineIdx: i,
 					indent: tabs,
-					label: '', // resolved to the control-file basename in the herald pass
+					label: '', // resolved to the control-file basename in the duckies pass
 					dir: '',
 					note: null,
 					showNow: leadingBang || undefined,
 					strippedLine: leadingBang ? tabs + t0 : undefined,
 				}
-				heralds.push(item)
-				lastTopHerald = item
+				duckies.push(item)
+				lastTopDuckies = item
 				cur = null
 				containers = []
 				continue
@@ -597,7 +604,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 						showNowFired: false,
 						sleep,
 						widgets: [],
-						heralds: [],
+						duckies: [],
 					}
 					sessions.push(cur)
 					containers = [{ indent: 0, session: cur }]
@@ -622,7 +629,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				showNowFired: false,
 				sleep,
 				widgets: [],
-				heralds: [],
+				duckies: [],
 			}
 			sessions.push(cur)
 			containers = [{ indent: 0, session: cur }]
@@ -630,12 +637,12 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 		}
 		if (!cur) {
 			// Outside any session, the only indented lines we capture sit directly under a top-level
-			// `HERALD:` directive: its `-> ` done-note, or its live `[EXECUTING]` marker. Everything
+			// `DUCKIES:` directive: its `-> ` done-note, or its live `[EXECUTING]` marker. Everything
 			// else is ignored.
-			if (lastTopHerald && NOTE_RE.test(line.trim())) lastTopHerald.note = { text: line.trim().replace(NOTE_RE, ''), lineIdx: i }
-			else if (lastTopHerald && /^\[executing\]$/i.test(line.trim())) {
-				lastTopHerald.marker = { kind: 'EXECUTING', lineIdx: i }
-				lastTopHerald.desiredKind = 'EXECUTING'
+			if (lastTopDuckies && NOTE_RE.test(line.trim())) lastTopDuckies.note = { text: line.trim().replace(NOTE_RE, ''), lineIdx: i }
+			else if (lastTopDuckies && /^\[executing\]$/i.test(line.trim())) {
+				lastTopDuckies.marker = { kind: 'EXECUTING', lineIdx: i }
+				lastTopDuckies.desiredKind = 'EXECUTING'
 			}
 			continue
 		}
@@ -660,7 +667,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 			}
 			continue
 		}
-		// A `| ` line below an `&name` widget is one line of its live output block (herald
+		// A `| ` line below an `&name` widget is one line of its live output block (duckies
 		// writes it there; a human normally wouldn't). It's inert — never a queue item — and
 		// its range is tracked so the tick can rewrite it with fresh output. A non-`|` line ends
 		// the block. This is checked before the container routing below so output that happens to
@@ -696,7 +703,7 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 			// once; `&&` reruns on the widget's interval. The tick rewrites the output — inline as
 			// `&name: …` for a single line, or a `| ` block below for several. Split an optional
 			// inline-output suffix (` : <output>`) off the rest here: the `: ` delimiter can't clash
-			// with the name and rarely with an arg, and whatever follows is herald's own output.
+			// with the name and rarely with an arg, and whatever follows is duckies's own output.
 			const sigil = widgetMatch[1]
 			const rest = widgetMatch[3]
 			const ci = rest.indexOf(': ')
@@ -744,13 +751,13 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				showNowInline: leadingBang || undefined,
 				strippedLine: leadingBang ? tabs + t : undefined,
 			})
-		} else if (HERALD_RE.test(t)) {
-			// A `HERALD: <directive>` line: a one-shot request for a background agent to edit the
-			// `.herald` file(s). Collected on the session (not the queue); its `-> ` note (attached
+		} else if (DUCKIES_RE.test(t)) {
+			// A `DUCKIES: <directive>` line: a one-shot request for a background agent to edit the
+			// `.dk` file(s). Collected on the session (not the queue); its `-> ` note (attached
 			// in the NOTE_RE branch below) marks it done. A leading `!` (stripped above) reveals the
 			// agent's window once it's up, like a `!` on a prompt; the `!` is consumed once revealed.
-			target.heralds.push({
-				directive: t.replace(HERALD_RE, '').trim(),
+			target.duckies.push({
+				directive: t.replace(DUCKIES_RE, '').trim(),
 				lineIdx: i,
 				indent: tabs,
 				label: target.label,
@@ -862,13 +869,13 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 								: null
 			// A status marker attaches to the nearest preceding prompt (in this container)
 			// without a marker; anything unrecognised (e.g. [NO DIR …]) is a session marker. A
-			// `HERALD:` directive can also own an `[EXECUTING]` marker — if one sits nearer than any
+			// `DUCKIES:` directive can also own an `[EXECUTING]` marker — if one sits nearer than any
 			// unmarked prompt, it wins (same nearest-item rule the `-> ` note pass uses).
 			const owner = kind ? [...target.prompts].reverse().find((p) => !p.marker && !p.isBarrier && !p.isShow) : undefined
-			const heraldOwner = kind ? [...target.heralds].reverse().find((h) => !h.marker) : undefined
-			if (kind && heraldOwner && (!owner || heraldOwner.lineIdx > owner.lineIdx)) {
-				heraldOwner.marker = { kind, lineIdx: i }
-				heraldOwner.desiredKind = kind
+			const duckiesOwner = kind ? [...target.duckies].reverse().find((h) => !h.marker) : undefined
+			if (kind && duckiesOwner && (!owner || duckiesOwner.lineIdx > owner.lineIdx)) {
+				duckiesOwner.marker = { kind, lineIdx: i }
+				duckiesOwner.desiredKind = kind
 			} else if (kind && owner) {
 				owner.marker = { kind, lineIdx: i }
 				owner.desiredKind = kind
@@ -878,14 +885,14 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				target.desiredSession = body
 			}
 		} else if (NOTE_RE.test(t)) {
-			// A `-> <summary>` line herald wrote below a finished prompt or `HERALD:` directive.
+			// A `-> <summary>` line duckies wrote below a finished prompt or `DUCKIES:` directive.
 			// Inert (no marker, never runs); attach it to the nearest preceding item so buildOps
 			// won't re-add it. Caught here, before the worktree case, so the non-sigil line isn't
-			// read as a worktree. A `HERALD:` directive above wins when it's nearer than any prompt.
+			// read as a worktree. A `DUCKIES:` directive above wins when it's nearer than any prompt.
 			const promptOwner = [...target.prompts].reverse().find((p) => !p.isBarrier && !p.isShow)
-			const heraldOwner = target.heralds[target.heralds.length - 1]
+			const duckiesOwner = target.duckies[target.duckies.length - 1]
 			const note = { text: t.replace(NOTE_RE, ''), lineIdx: i }
-			if (heraldOwner && (!promptOwner || heraldOwner.lineIdx > promptOwner.lineIdx)) heraldOwner.note = note
+			if (duckiesOwner && (!promptOwner || duckiesOwner.lineIdx > promptOwner.lineIdx)) duckiesOwner.note = note
 			else if (promptOwner) promptOwner.note = note
 		} else {
 			// A non-sigil indented line names a git worktree of its container's repo. It's a
@@ -922,24 +929,24 @@ export function parse(content: string, aliases: Aliases = {}, macros: Macros = {
 				showNowFired: false,
 				sleep: sleep || !!target.sleep,
 				widgets: [],
-				heralds: [],
+				duckies: [],
 			}
 			sessions.push(wt)
 			containers.push({ indent: d, session: wt })
 		}
 	}
-	return { lines, sessions, heralds }
+	return { lines, sessions, duckies }
 }
 
 // ------------------------------------------------- lossless in-place rewrite
 
 type Op = { pos: number; type: 'replace' | 'delete' | 'insert'; text?: string }
 
-// Rewrite ops for a set of `HERALD:` directives (session-attached or top-level): mirror a finished
+// Rewrite ops for a set of `DUCKIES:` directives (session-attached or top-level): mirror a finished
 // directive's `-> ` summary just below its line, once (the note then marks it done — parse won't
-// re-run it; idempotent via the `!item.note` guard), and consume a fired `!HERALD:` reveal by
+// re-run it; idempotent via the `!item.note` guard), and consume a fired `!DUCKIES:` reveal by
 // rewriting the line without its `!`.
-export function buildHeraldOps(items: HeraldItem[]): Op[] {
+export function buildDuckiesOps(items: DuckiesItem[]): Op[] {
 	const ops: Op[] = []
 	for (const item of items) {
 		if (item.showNowFired && item.strippedLine !== undefined) ops.push({ pos: item.lineIdx, type: 'replace', text: item.strippedLine })
@@ -1011,7 +1018,7 @@ export function buildOps(sessions: Session[], skip?: Set<Session>): Op[] {
 				ops.push({ pos: p.bodyEndIdx, type: 'insert', text: `${p.indent}\t${MARKER[p.desiredKind]}` })
 			}
 		}
-		ops.push(...buildHeraldOps(s.heralds))
+		ops.push(...buildDuckiesOps(s.duckies))
 		// A fired "show now" (`!` on a repo header or worktree label) is consumed by
 		// stripping the `!`; the leading indent (empty for a repo header) is preserved.
 		if (s.showNow && s.showNowFired) ops.push({ pos: s.headerIdx, type: 'replace', text: `${s.indent ?? ''}${s.header}` })
@@ -1102,10 +1109,10 @@ export function vacatedSessions(sessions: Session[], liveLabels: Set<string>): {
 	for (const s of [...ordered].reverse()) {
 		const kids = children.get(s)!
 		liveSub.set(s, liveLabels.has(s.label) || kids.some((k) => liveSub.get(k)!))
-		// A widget or an unfinished `HERALD:` directive makes a session "occupied" the same way a
+		// A widget or an unfinished `DUCKIES:` directive makes a session "occupied" the same way a
 		// prompt does — a live display or a still-running directive must not be reaped from under its
 		// line. A directive that already has its `-> ` note is done, so it no longer holds the session.
-		if (s.prompts.length === 0 && s.widgets.length === 0 && s.heralds.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
+		if (s.prompts.length === 0 && s.widgets.length === 0 && s.duckies.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
 	}
 	const tops = ordered.filter((s) => removed.has(s) && !(parent.get(s) && removed.has(parent.get(s)!)))
 	return { tops, all: removed }
@@ -1128,7 +1135,7 @@ export function vacateOps(tops: Session[], lines: string[]): Op[] {
 // ---------------------------------------------------- capture-to-file placement
 
 // A manually-typed item captured from a live pane: a claude prompt (isCmd false) or a shell
-// command (isCmd true), with herald's own sends already filtered out.
+// command (isCmd true), with duckies's own sends already filtered out.
 export interface CaptureItem {
 	text: string
 	isCmd: boolean
@@ -1239,7 +1246,7 @@ interface LaneRt {
 	starting: boolean
 	startedAt: number
 	// The last few prompts/commands this lane sent, kept so the capture pass can tell
-	// herald's own sends (which re-fire the same UserPromptSubmit/post-command hooks) from
+	// duckies's own sends (which re-fire the same UserPromptSubmit/post-command hooks) from
 	// input a human typed straight into the pane. Each is matched-and-dropped once.
 	pendingSent?: string[]
 	pendingSentCmd?: string[]
@@ -1274,11 +1281,11 @@ interface RtEntry {
 	// Per-widget refresh gate, keyed `name#occurrence` within this label: when it last ran, so a
 	// widget only reruns once its `interval` has elapsed (survives restarts via controller.json).
 	widgets?: Record<string, { lastRun: number }>
-	// In-flight HERALD directives, keyed by directive hash + occurrence within this label. `startedAt`
+	// In-flight DUCKIES directives, keyed by directive hash + occurrence within this label. `startedAt`
 	// is when the agent window was created (times out a stuck run); `sentAt` is when the directive was
 	// typed in (0 until then — gates the boot grace, and its Stop must be newer to count as finished).
 	// Persisted so a run is tracked across restarts.
-	heralds?: Record<string, { startedAt: number; sentAt: number }>
+	duckies?: Record<string, { startedAt: number; sentAt: number }>
 }
 type Rt = Record<string, RtEntry>
 
@@ -1306,8 +1313,8 @@ interface StateEvent {
 	mtimeMs: number
 }
 // Done-files are per lane. Lane 1 keeps the bare `<label>.json`/`<label>.cmd` names
-// (back-compat, incl. tmux-resurrect restores that predate HERALD_PANE); lane n>1 uses
-// `<label>.<n>.json`/`<label>.<n>.cmd`, matching the `HERALD_PANE` suffix the hooks add.
+// (back-compat, incl. tmux-resurrect restores that predate DUCKIES_PANE); lane n>1 uses
+// `<label>.<n>.json`/`<label>.<n>.cmd`, matching the `DUCKIES_PANE` suffix the hooks add.
 const paneSuffix = (n: number) => (n > 1 ? `.${n}` : '')
 const statePath = (label: string, n: number) => join(STATE, `${label}${paneSuffix(n)}.json`)
 // Read + parse a Stop/Notification hook state file at `p` (the newest event for that pane).
@@ -1399,7 +1406,7 @@ async function jevAttentionProb(text: string): Promise<number | null> {
 	}
 }
 // The last `-> …` line in a blob of text, its `->` prefix stripped, or null if there is none.
-// Shared by the transcript reader and the HERALD agent's captured stdout.
+// Shared by the transcript reader and the DUCKIES agent's captured stdout.
 function extractNote(text: string): string | null {
 	const noteLine = text
 		.split('\n')
@@ -1440,11 +1447,11 @@ const rmCmdDone = (label: string, n: number) => {
 	} catch {}
 }
 // Remove every lane's state files for a label (session teardown), including numbered
-// panes, the capture logs, and any in-flight HERALD agent files, so a later reuse of the
+// panes, the capture logs, and any in-flight DUCKIES agent files, so a later reuse of the
 // label doesn't read stale input.
 const rmAllDoneFiles = (label: string) => {
 	const l = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-	const re = new RegExp(`^${l}(?:(?:\\.\\d+)?\\.(json|cmd|in|incmd)|\\.herald\\..*)$`)
+	const re = new RegExp(`^${l}(?:(?:\\.\\d+)?\\.(json|cmd|in|incmd)|\\.dk\\..*)$`)
 	for (const f of readdirSync(STATE)) {
 		if (re.test(f)) {
 			try {
@@ -1453,42 +1460,42 @@ const rmAllDoneFiles = (label: string) => {
 		}
 	}
 }
-// A short, stable key for a HERALD directive: a hash of its text plus its occurrence within the
+// A short, stable key for a DUCKIES directive: a hash of its text plus its occurrence within the
 // label, so line-number shifts don't change it and two identical directives don't collide. Keys the
-// agent window's `@herald` tag, its Stop-hook state file, and its in-flight rt record.
-const heraldHash = (s: string): string => {
+// agent window's `@duckies` tag, its Stop-hook state file, and its in-flight rt record.
+const duckiesHash = (s: string): string => {
 	let h = 5381
 	for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0
 	return h.toString(36)
 }
-// The HERALD agent's per-run state file, written by the agent `claude`'s Stop hook: its
-// `HERALD_PANE` is set to `herald.<key>`, so the hook lands its payload (event + transcript path)
-// here. `<label>.herald.<key>.json` never collides with a lane's numeric-suffixed state file.
-const heraldFile = (label: string, key: string, ext: string) => join(STATE, `${label}.herald.${key}.${ext}`)
-const rmHeraldFiles = (label: string, key: string) => {
-	const prefix = `${label}.herald.${key}.`
+// The DUCKIES agent's per-run state file, written by the agent `claude`'s Stop hook: its
+// `DUCKIES_PANE` is set to `duckies.<key>`, so the hook lands its payload (event + transcript path)
+// here. `<label>.dk.<key>.json` never collides with a lane's numeric-suffixed state file.
+const duckiesFile = (label: string, key: string, ext: string) => join(STATE, `${label}.dk.${key}.${ext}`)
+const rmDuckiesFiles = (label: string, key: string) => {
+	const prefix = `${label}.dk.${key}.`
 	for (const f of readdirSync(STATE)) if (f.startsWith(prefix)) {
 		try {
 			unlinkSync(join(STATE, f))
 		} catch {}
 	}
 }
-// The prompt fed to a HERALD agent: the directive plus where it came from, so "here"/"this" resolve.
-const heraldPrompt = (item: HeraldItem, filePath: string): string =>
+// The prompt fed to a DUCKIES agent: the directive plus where it came from, so "here"/"this" resolve.
+const duckiesPrompt = (item: DuckiesItem, filePath: string): string =>
 	[
 		item.directive,
 		'',
 		'---',
-		'This directive comes from a herald control file. Location:',
+		'This directive comes from a duckies control file. Location:',
 		`  file: ${filePath}`,
-		`  line: ${item.lineIdx + 1}   (the "HERALD:" line)`,
+		`  line: ${item.lineIdx + 1}   (the "DUCKIES:" line)`,
 		`  session block: ${item.label}${item.dir ? `   (repo dir: ${item.dir})` : ''}`,
 		'',
 		'Words like "here", "this", "this worktree", "this lane" refer to that location in that file.',
 		'Read the file to understand the surrounding session / worktree / lane structure, then make the',
-		'requested edits to the .herald file(s). Keep the "HERALD:" line itself intact — do not delete or',
-		'rewrite it — and do not add the "-> " summary line yourself (herald writes that from your reply).',
-		'End your reply with a "-> " one-line summary as usual. See CLAUDE.md for the .herald format.',
+		'requested edits to the .dk file(s). Keep the "DUCKIES:" line itself intact — do not delete or',
+		'rewrite it — and do not add the "-> " summary line yourself (duckies writes that from your reply).',
+		'End your reply with a "-> " one-line summary as usual. See CLAUDE.md for the .dk format.',
 	].join('\n')
 // Remove just one lane's state files (single-lane teardown), so its numbered done/capture
 // logs don't linger — or get re-read — after the lane's panes are gone.
@@ -1509,7 +1516,7 @@ const safeMtime = (p: string): number => {
 
 // -------------------------------------------------------- capturing pane input
 
-// Manually-typed input mirrored back into the `.herald` file. A live pane's hooks append
+// Manually-typed input mirrored back into the `.dk` file. A live pane's hooks append
 // what the user types: the claude UserPromptSubmit hook writes each submitted prompt's raw
 // payload (one JSON object per line) to `<label>[.n].in`, and each shell's post-command
 // hook writes the command line to `<label>[.n].incmd`. Per lane, the controller drops its
@@ -1531,7 +1538,7 @@ function captureFiles(label: string): { n: number; kind: 'in' | 'incmd' }[] {
 // A prompt the harness injects to re-invoke a session on its own — notably the
 // `<task-notification>` block fired when a background task/loop completes. It fires the
 // UserPromptSubmit hook like a real prompt, but no human typed it, so it must not be
-// mirrored back into the `.herald` file as a captured `:` line.
+// mirrored back into the `.dk` file as a captured `:` line.
 export const isSyntheticPrompt = (p: string): boolean => /^\s*<task-notification>/.test(p)
 // Read a capture log without consuming it: the parsed items, the byte length seen (so exactly
 // that prefix is truncated once the tick commits, leaving any concurrent append for next
@@ -1567,7 +1574,7 @@ function truncateCapture(path: string, len: number) {
 		else writeFileSync(path, buf.subarray(len))
 	} catch {}
 }
-// Remember a prompt/command herald just dispatched into a lane, so its own hook echo isn't
+// Remember a prompt/command duckies just dispatched into a lane, so its own hook echo isn't
 // mistaken for human input. Only the last few matter (they're matched off within a tick or
 // two); older entries are dropped to bound growth.
 const SENT_KEEP = 10
@@ -1598,18 +1605,18 @@ const PREFIX = '__'
 const T = (label: string) => `${PREFIX}${label}`
 const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`
 
-// The herald-view window (window 0 of a top-level session): the tui in `--session` mode,
-// showing this label's `.herald` blocks compiled across every control file — live, editable,
+// The duckies-view window (window 0 of a top-level session): the tui in `--session` mode,
+// showing this label's `.dk` blocks compiled across every control file — live, editable,
 // bidirectionally synced. Launched with the same dir/alias/macro env the supervisor resolved,
-// so it compiles from exactly the files herald manages. tsx is taken from the repo's own
+// so it compiles from exactly the files duckies manages. tsx is taken from the repo's own
 // node_modules so the pane needs nothing on PATH.
 const TUI_PATH = join(HERE, 'tui.ts')
 const TSX_BIN = join(HERE, 'node_modules', '.bin', 'tsx')
 function viewCmd(label: string): string {
 	// `env` so the assignments work regardless of the pane's login shell (fish has no
 	// `VAR=val cmd` form); values are single-quoted for the shell that types the line.
-	const env: string[] = [`HERALD_DIR=${q(CONTROL_DIR)}`]
-	for (const k of ['HERALD_FILE', 'HERALD_ALIASES', 'HERALD_MACROS', 'HERALD_WIDGETS', 'HERALD_DEV_DIR'] as const) {
+	const env: string[] = [`DUCKIES_DIR=${q(CONTROL_DIR)}`]
+	for (const k of ['DUCKIES_FILE', 'DUCKIES_ALIASES', 'DUCKIES_MACROS', 'DUCKIES_WIDGETS', 'DUCKIES_DEV_DIR'] as const) {
 		if (process.env[k]) env.push(`${k}=${q(process.env[k]!)}`)
 	}
 	return `env ${env.join(' ')} ${q(TSX_BIN)} ${q(TUI_PATH)} --session ${q(label)}`
@@ -1626,21 +1633,21 @@ async function listTmux(): Promise<Set<string>> {
 }
 
 // Each lane has a claude window (prompts) and a shell window (`$command`s). We tag each
-// pane with a pane-scoped user option (@herald = the role string) which — unlike pane
+// pane with a pane-scoped user option (@duckies = the role string) which — unlike pane
 // titles — the running program can't clobber, and which survives focus changes, non-zero
 // base-index, and controller restart. Lane 1 uses the bare roles `claude`/`shell` (the
 // window names too), lane n>1 uses `claude<n>`/`shell<n>`. -s searches all windows.
 type PaneKind = 'claude' | 'shell'
 const paneRole = (kind: PaneKind, n: number): string => (n > 1 ? `${kind}${n}` : kind)
 
-// Resolve a lane's pane by role: prefer the @herald tag, else the window still named for
+// Resolve a lane's pane by role: prefer the @duckies tag, else the window still named for
 // that role (tag lost on tmux-resurrect, or a pre-tag session). Null if absent.
 async function paneFor(label: string, kind: PaneKind, n: number): Promise<string | null> {
 	const role = paneRole(kind, n)
 	const r = await $({
 		nothrow: true,
 		quiet: true,
-	})`tmux list-panes -s -t ${T(label)} -F ${'#{pane_id}\t#{@herald}\t#{window_name}'}`
+	})`tmux list-panes -s -t ${T(label)} -F ${'#{pane_id}\t#{@duckies}\t#{window_name}'}`
 	let byName: string | null = null
 	for (const line of r.stdout.split('\n')) {
 		const [id, tag, win] = line.split('\t')
@@ -1680,7 +1687,7 @@ export const paneWorking = (out: string): boolean => /^\s*[^\w\s]\s+\S*…\s*\(/
 // frame, and its `· <n> shells` segment vanishes the instant the count hits zero. The rest of the
 // pane is untrustworthy — a prior turn's `✻ Cogitated for 58s · 2 shells still running` summary
 // carries the same text but is a historical log line that scrolls up and lingers, and a session
-// that discusses herald itself has conversation text quoting `· N shells`. Both would false-
+// that discusses duckies itself has conversation text quoting `· N shells`. Both would false-
 // positive. So look only at the last few non-empty lines (the footer + status line), and still
 // exclude the `… shells still running` summary form as a belt-and-suspenders guard.
 export const paneBackgroundRunning = (out: string): boolean => {
@@ -1700,17 +1707,17 @@ async function claudeBusy(label: string, n: number): Promise<boolean | null> {
 	return (await readClaudePane(label, n))?.busy ?? null
 }
 
-// The pane *only* if it still carries its @herald tag. A tmux-resurrect restore brings a
+// The pane *only* if it still carries its @duckies tag. A tmux-resurrect restore brings a
 // session back with fresh panes that ran `exec fish` under the session env alone: they
-// lost the per-window HERALD_SHELL=1/HERALD_PANE that make the completion hook fire, and
-// lost the @herald tag. Such a pane is found by paneFor()'s name fallback but returns null
+// lost the per-window DUCKIES_SHELL=1/DUCKIES_PANE that make the completion hook fire, and
+// lost the @duckies tag. Such a pane is found by paneFor()'s name fallback but returns null
 // here, which is what flags it for repair.
 async function taggedPane(label: string, kind: PaneKind, n: number): Promise<string | null> {
 	const role = paneRole(kind, n)
 	const r = await $({
 		nothrow: true,
 		quiet: true,
-	})`tmux list-panes -s -t ${T(label)} -F ${'#{pane_id}\t#{@herald}'}`
+	})`tmux list-panes -s -t ${T(label)} -F ${'#{pane_id}\t#{@duckies}'}`
 	for (const line of r.stdout.split('\n')) {
 		const [id, tag] = line.split('\t')
 		if (id && tag === role) return id
@@ -1719,11 +1726,11 @@ async function taggedPane(label: string, kind: PaneKind, n: number): Promise<str
 }
 
 // The numbered lanes (n>1) that currently have a tmux window for this session, read from
-// the @herald tag (or the window name, if a restore stripped the tag). Lane 1 is the bare
+// the @duckies tag (or the window name, if a restore stripped the tag). Lane 1 is the bare
 // `claude`/`shell` session windows and never appears here — used to reap lanes whose lines
 // were deleted from the file.
 async function liveLanes(label: string): Promise<Set<number>> {
-	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(label)} -F ${'#{@herald}\t#{window_name}'}`
+	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(label)} -F ${'#{@duckies}\t#{window_name}'}`
 	const out = new Set<number>()
 	for (const line of r.stdout.split('\n')) {
 		const [tag, win] = line.split('\t')
@@ -1755,8 +1762,8 @@ async function typeInto(pane: string, text: string, vimInsert = false) {
 		// A multiline prompt (a `:` line plus its deeper-indented body) can't go through
 		// send-keys — the first newline would submit it. Bracketed paste (`-p`) delivers the
 		// whole block as one paste, so Claude inserts the newlines as input; then Enter sends.
-		await tm`tmux set-buffer -b herald -- ${text}`
-		await tm`tmux paste-buffer -p -d -b herald -t ${pane}`
+		await tm`tmux set-buffer -b duckies -- ${text}`
+		await tm`tmux paste-buffer -p -d -b duckies -t ${pane}`
 	} else {
 		await tm`tmux send-keys -t ${pane} -l -- ${text}`
 	}
@@ -1784,7 +1791,7 @@ async function sendCmd(label: string, text: string, n = 1) {
 		return
 	}
 	// The command's exit status is written to its done-file by the per-shell hook
-	// in the shell window (see herald-{fish,bash,zsh}.*), so we type it verbatim.
+	// in the shell window (see duckies-{fish,bash,zsh}.*), so we type it verbatim.
 	await typeInto(pane, text)
 }
 
@@ -1823,18 +1830,18 @@ async function runWidget(def: Widget, args: string[], dir: string): Promise<stri
 }
 
 // Create lane `n`'s pane of `kind` as a new window, wired for completion reporting:
-// HERALD_LABEL/HERALD_STATE (so a pane recreated on an env-less session still reports),
-// HERALD_SHELL to mark a shell as the command-runner, and HERALD_PANE=n (n>1) so the hook
+// DUCKIES_LABEL/DUCKIES_STATE (so a pane recreated on an env-less session still reports),
+// DUCKIES_SHELL to mark a shell as the command-runner, and DUCKIES_PANE=n (n>1) so the hook
 // suffixes its done-file. A claude pane also launches `claude` (the caller waits out the
 // boot grace before dispatching to it). Returns the new pane id.
 async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: number, resumeId?: string): Promise<string> {
 	const tm = $({ nothrow: true, quiet: true })
 	const role = paneRole(kind, n)
-	const env = ['-e', `HERALD_LABEL=${label}`, '-e', `HERALD_STATE=${STATE}`]
-	if (kind === 'shell') env.push('-e', 'HERALD_SHELL=1')
-	if (n > 1) env.push('-e', `HERALD_PANE=${n}`)
+	const env = ['-e', `DUCKIES_LABEL=${label}`, '-e', `DUCKIES_STATE=${STATE}`]
+	if (kind === 'shell') env.push('-e', 'DUCKIES_SHELL=1')
+	if (n > 1) env.push('-e', `DUCKIES_PANE=${n}`)
 	const created = (await tm`tmux new-window -P -F ${'#{pane_id}'} -t ${T(label)} -n ${role} -c ${dir} ${env}`).stdout.trim()
-	await tm`tmux set-option -p -t ${created} @herald ${role}`
+	await tm`tmux set-option -p -t ${created} @duckies ${role}`
 	if (kind === 'claude') {
 		await sleep(300)
 		if (resumeId) log(`resuming ${T(label)}${n > 1 ? `:${n}` : ''} conversation ${resumeId}`)
@@ -1846,10 +1853,10 @@ async function ensurePaneWindow(label: string, dir: string, kind: PaneKind, n: n
 // (doSpawn / repairShell) that only ever touch lane 1.
 const makeShellWindow = (label: string, dir: string) => ensurePaneWindow(label, dir, 'shell', 1)
 
-// The @herald roles present on a session's panes (e.g. {claude, shell}). A complete
+// The @duckies roles present on a session's panes (e.g. {claude, shell}). A complete
 // session has both; anything missing means a tmux step during spawn silently failed.
 async function taggedRoles(label: string): Promise<Set<string>> {
-	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(label)} -F ${'#{@herald}'}`
+	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(label)} -F ${'#{@duckies}'}`
 	return new Set(r.stdout.split('\n').map((x) => x.trim()).filter(Boolean))
 }
 
@@ -1857,16 +1864,16 @@ async function doSpawn(label: string, dir: string, resumeId?: string) {
 	log(`spawning ${T(label)} in ${dir}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
-	// Every session opens with the herald view as window 0 (so it sorts first and an attach
-	// lands on it): a live, editable, cross-file-merged view of this label's `.herald` blocks. A
+	// Every session opens with the duckies view as window 0 (so it sorts first and an attach
+	// lands on it): a live, editable, cross-file-merged view of this label's `.dk` blocks. A
 	// worktree label has no column-0 header of its own, so its view is compiled with the parent
 	// repo header as context (see tui.ts viewParts) — the pane still just runs `--session <label>`.
-	await tm`tmux new-session -d -s ${T(label)} -n herald -c ${CONTROL_DIR}`
+	await tm`tmux new-session -d -s ${T(label)} -n duckies -c ${CONTROL_DIR}`
 	const viewPane = (await tm`tmux list-panes -t ${T(label)} -F ${'#{pane_id}'}`).stdout.split('\n')[0]?.trim() || T(label)
-	await tm`tmux set-option -p -t ${viewPane} @herald view`
+	await tm`tmux set-option -p -t ${viewPane} @duckies view`
 	await sleep(300)
 	await typeInto(viewPane, viewCmd(label))
-	// claude + shell as their own tagged windows; ensurePaneWindow sets HERALD_LABEL/STATE
+	// claude + shell as their own tagged windows; ensurePaneWindow sets DUCKIES_LABEL/STATE
 	// per-window, so no session-level env is needed (and none leaks to ad-hoc windows).
 	await ensurePaneWindow(label, dir, 'claude', 1, resumeId)
 	await makeShellWindow(label, dir)
@@ -1981,14 +1988,14 @@ async function removeWorktree(label: string, base: string, dir: string) {
 
 // Recreate lane `n`'s shell window so command completion is reported again. Two cases:
 // a partial/absent pane, or a tmux-resurrect restore that brought the shell back stripped
-// of its HERALD_SHELL/HERALD_PANE env and @herald tag (see taggedPane). In the restore
+// of its DUCKIES_SHELL/DUCKIES_PANE env and @duckies tag (see taggedPane). In the restore
 // case a stale, untagged shell pane exists — kill its window first so we don't leave a
 // duplicate — then create a fresh, tagged one. Leaves the lane-1 claude window focused.
 async function repairShell(label: string, dir: string, n = 1) {
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
 	const stale = await shellPane(label, n)
-	log(`repairing ${T(label)} shell${n > 1 ? n : ''}: ${stale ? 'recreating restored window (restoring HERALD_SHELL)' : 'recreating missing window'}`)
+	log(`repairing ${T(label)} shell${n > 1 ? n : ''}: ${stale ? 'recreating restored window (restoring DUCKIES_SHELL)' : 'recreating missing window'}`)
 	if (stale) await tm`tmux kill-window -t ${stale}`
 	await ensurePaneWindow(label, dir, 'shell', n)
 	await tm`tmux select-window -t ${await claudePane(label)}`
@@ -1996,7 +2003,7 @@ async function repairShell(label: string, dir: string, n = 1) {
 
 // Recreate lane `n`'s claude window so its Stop/Notification hook reports again — the claude
 // counterpart of repairShell. A tmux-resurrect restore brings the pane back as a bare shell
-// stripped of HERALD_LABEL/HERALD_PANE and the @herald tag (see taggedPane), so the hook
+// stripped of DUCKIES_LABEL/DUCKIES_PANE and the @duckies tag (see taggedPane), so the hook
 // no-ops and the frontier prompt latches at [EXECUTING] forever with no Stop to advance it.
 // Re-tagging can't help — the restored process never inherited the env — so we kill the
 // stale window (its claude is already gone) and spawn a fresh, tagged one that relaunches
@@ -2006,7 +2013,7 @@ async function repairClaude(label: string, dir: string, n = 1, resumeId?: string
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
 	const stale = await paneFor(label, 'claude', n)
-	log(`repairing ${T(label)} claude${n > 1 ? n : ''}: ${stale ? 'recreating restored window (restoring HERALD_LABEL)' : 'recreating missing window'}`)
+	log(`repairing ${T(label)} claude${n > 1 ? n : ''}: ${stale ? 'recreating restored window (restoring DUCKIES_LABEL)' : 'recreating missing window'}`)
 	if (stale) await tm`tmux kill-window -t ${stale}`
 	const created = await ensurePaneWindow(label, dir, 'claude', n, resumeId)
 	await tm`tmux select-window -t ${created}`
@@ -2058,7 +2065,7 @@ async function showSession(label: string, window?: Window, explicitPane?: string
 	// Bring the configured terminal (the one watching these sessions) to the foreground, so a
 	// `show`/`!` actually surfaces it even when another app is focused. macOS + opt-in only.
 	if (process.platform === 'darwin' && TERM_APP) await tm`osascript -e ${`tell application "${TERM_APP}" to activate`}`
-	// Reveal a specific window before switching the client: an explicit pane id (a HERALD agent
+	// Reveal a specific window before switching the client: an explicit pane id (a DUCKIES agent
 	// window), or the lane/kind the caller named (the shell for a `$command` show, a numbered lane's
 	// pane), so the switch lands on it rather than the session's last-active window.
 	const pane = explicitPane ?? (window ? await paneFor(label, window.kind, window.n) : null)
@@ -2080,15 +2087,15 @@ async function showSession(label: string, window?: Window, explicitPane?: string
 	if (watching.length) await tm`tmux switch-client -c ${watching[0][0]} -t ${T(label)}`
 }
 
-// ---------------------------------------------------------- HERALD agent windows
-// A HERALD directive runs a real `claude` in its own window inside the dedicated `__herald-agent`
-// session, tagged `@herald <key>`. Its claude reports completion through the same Stop hook as a
-// lane (HERALD_PANE=`herald.<key>` → state/<label>.herald.<key>.json), so we read the `-> ` summary
+// ---------------------------------------------------------- DUCKIES agent windows
+// A DUCKIES directive runs a real `claude` in its own window inside the dedicated `__duckies-agent`
+// session, tagged `@duckies <key>`. Its claude reports completion through the same Stop hook as a
+// lane (DUCKIES_PANE=`duckies.<key>` → state/<label>.dk.<key>.json), so we read the `-> ` summary
 // from its transcript exactly like a finished prompt.
 
-// The agent window's pane for `key`, matched by its `@herald <key>` tag. Null if absent.
-async function heraldAgentPane(key: string): Promise<string | null> {
-	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(AGENT_SESSION_LABEL)} -F ${'#{pane_id}\t#{@herald}'}`
+// The agent window's pane for `key`, matched by its `@duckies <key>` tag. Null if absent.
+async function duckiesAgentPane(key: string): Promise<string | null> {
+	const r = await $({ nothrow: true, quiet: true })`tmux list-panes -s -t ${T(AGENT_SESSION_LABEL)} -F ${'#{pane_id}\t#{@duckies}'}`
 	for (const line of r.stdout.split('\n')) {
 		const [id, tag] = line.split('\t')
 		if (id && tag === key) return id
@@ -2097,47 +2104,47 @@ async function heraldAgentPane(key: string): Promise<string | null> {
 }
 // Create the agent window for `item` and launch `claude` in it: cwd = the agent dir (its CLAUDE.md),
 // the control dir added so it can edit the files, and a permission mode that needs no prompts. The
-// directive itself is typed in later (sendHeraldDirective), once claude has booted. The dedicated
-// `__herald-agent` session is created on first use; the window is named for the target label.
-async function spawnHeraldAgent(item: HeraldItem, key: string) {
-	log(`herald agent ${T(item.label)}: launch ${JSON.stringify(item.directive)}`)
+// directive itself is typed in later (sendDuckiesDirective), once claude has booted. The dedicated
+// `__duckies-agent` session is created on first use; the window is named for the target label.
+async function spawnDuckiesAgent(item: DuckiesItem, key: string) {
+	log(`duckies agent ${T(item.label)}: launch ${JSON.stringify(item.directive)}`)
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
 	const cwd = existsSync(AGENT_DIR) ? AGENT_DIR : CONTROL_DIR
-	// HERALD_PANE=`herald.<key>` routes the agent's Stop hook to state/<label>.herald.<key>.json.
-	const env = ['-e', `HERALD_LABEL=${item.label}`, '-e', `HERALD_STATE=${STATE}`, '-e', `HERALD_PANE=herald.${key}`]
+	// DUCKIES_PANE=`duckies.<key>` routes the agent's Stop hook to state/<label>.dk.<key>.json.
+	const env = ['-e', `DUCKIES_LABEL=${item.label}`, '-e', `DUCKIES_STATE=${STATE}`, '-e', `DUCKIES_PANE=duckies.${key}`]
 	const has = (await tm`tmux has-session -t ${T(AGENT_SESSION_LABEL)}`).exitCode === 0
 	const pane = has
 		? (await tm`tmux new-window -P -F ${'#{pane_id}'} -t ${T(AGENT_SESSION_LABEL)} -n ${item.label} -c ${cwd} ${env}`).stdout.trim()
 		: (await tm`tmux new-session -d -s ${T(AGENT_SESSION_LABEL)} -n ${item.label} -c ${cwd} ${env} -P -F ${'#{pane_id}'}`).stdout.trim()
-	await tm`tmux set-option -p -t ${pane} @herald ${key}`
-	let cmd = `${AGENT_CMD} --permission-mode ${HERALD_AGENT_PERM} --add-dir '${CONTROL_DIR}' --append-system-prompt-file '${buildSystemPromptFile()}'`
-	if (HERALD_AGENT_MODEL) cmd += ` --model ${HERALD_AGENT_MODEL}`
+	await tm`tmux set-option -p -t ${pane} @duckies ${key}`
+	let cmd = `${AGENT_CMD} --permission-mode ${DUCKIES_AGENT_PERM} --add-dir '${CONTROL_DIR}' --append-system-prompt-file '${buildSystemPromptFile()}'`
+	if (DUCKIES_AGENT_MODEL) cmd += ` --model ${DUCKIES_AGENT_MODEL}`
 	await sleep(300)
 	await typeInto(pane, cmd)
 }
-// Type the directive prompt into the (booted) agent pane, like any herald prompt (vim-insert +
+// Type the directive prompt into the (booted) agent pane, like any duckies prompt (vim-insert +
 // bracketed paste for the multiline block). No-op if the window is gone.
-async function sendHeraldDirective(item: HeraldItem, key: string, filePath: string) {
-	log(`herald agent ${T(item.label)}: prompt`)
+async function sendDuckiesDirective(item: DuckiesItem, key: string, filePath: string) {
+	log(`duckies agent ${T(item.label)}: prompt`)
 	if (DRY) return
-	const pane = await heraldAgentPane(key)
-	if (pane) await typeInto(pane, heraldPrompt(item, filePath), true)
+	const pane = await duckiesAgentPane(key)
+	if (pane) await typeInto(pane, duckiesPrompt(item, filePath), true)
 }
 // Whether the agent's pane is mid-turn (same spinner read as a lane); false if the window is gone.
-async function heraldAgentBusy(key: string): Promise<boolean> {
+async function duckiesAgentBusy(key: string): Promise<boolean> {
 	if (DRY) return false
-	const pane = await heraldAgentPane(key)
+	const pane = await duckiesAgentPane(key)
 	if (!pane) return false
 	const r = await $({ nothrow: true, quiet: true })`tmux capture-pane -p -t ${pane}`
 	return r.exitCode === 0 && paneWorking(r.stdout)
 }
-// Tear down a finished/cancelled agent: kill its window (the `__herald-agent` session dies with its
+// Tear down a finished/cancelled agent: kill its window (the `__duckies-agent` session dies with its
 // last window) and drop its state files.
-async function teardownHeraldAgent(label: string, key: string) {
-	rmHeraldFiles(label, key)
+async function teardownDuckiesAgent(label: string, key: string) {
+	rmDuckiesFiles(label, key)
 	if (DRY) return
-	const pane = await heraldAgentPane(key)
+	const pane = await duckiesAgentPane(key)
 	if (pane) await $({ nothrow: true, quiet: true })`tmux kill-window -t ${pane}`
 }
 
@@ -2151,8 +2158,8 @@ const atomicWrite = (path: string, content: string) => {
 	renameSync(tmp, path)
 }
 
-// Every `*.herald` file in the control dir, sorted for a stable merge order. In
-// single-file mode (HERALD_FILE) it's just that one file, if it exists.
+// Every `*.dk` file in the control dir, sorted for a stable merge order. In
+// single-file mode (DUCKIES_FILE) it's just that one file, if it exists.
 export function controlFiles(): string[] {
 	if (SINGLE_FILE) return existsSync(SINGLE_FILE) ? [SINGLE_FILE] : []
 	let names: string[]
@@ -2176,7 +2183,7 @@ export function controlFiles(): string[] {
 
 // Watch the control dir (not each file — a directory watch survives atomicWrite's temp-file
 // rename, which swaps the inode a per-file watch would lose) and invoke `onChange` whenever a
-// `.herald` file is touched. Lets the poll loop react to a save — e.g. a `!` reveal — within
+// `.dk` file is touched. Lets the poll loop react to a save — e.g. a `!` reveal — within
 // WATCH_MS instead of up to TICK_MS. Best-effort: if the watch can't be set up, the poll still
 // covers every change, just at TICK_MS granularity.
 function watchControls(onChange: () => void): void {
@@ -2538,7 +2545,7 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 		keepOnly(s, doneFrontier)
 	} else if (io.paneBackground === true && doneFrontier) {
 		// Idle pane, but backgrounded tasks are still running under a frontier we'd marked
-		// [DONE] (e.g. herald restarted while a loop slept between resumes). Reflect the
+		// [DONE] (e.g. duckies restarted while a loop slept between resumes). Reflect the
 		// pending self-resume as [WAITING] and hold — don't dispatch into a pane about to wake.
 		doneFrontier.desiredKind = 'WAITING'
 		keepOnly(s, doneFrontier)
@@ -2589,8 +2596,8 @@ interface Control {
 	content: string
 	lines: string[]
 	sessions: Session[]
-	// Top-level (column-0) `HERALD:` directives in this file — not attached to any session.
-	heralds: HeraldItem[]
+	// Top-level (column-0) `DUCKIES:` directives in this file — not attached to any session.
+	duckies: DuckiesItem[]
 	mtime: number
 }
 
@@ -2599,20 +2606,20 @@ async function tick(rt: Rt) {
 	const aliases = loadAliases()
 	const macros = loadMacros()
 	const widgets = loadWidgets()
-	// Read + parse every `.herald` file. Each file's sessions carry line indices into
+	// Read + parse every `.dk` file. Each file's sessions carry line indices into
 	// that file's own `lines`, so markers are written back to the file they came from.
 	const files = controlFiles()
 	// No control files at all means "not configured yet", not "kill everything" — do
 	// nothing rather than tearing down every live session over a missing/renamed file.
-	// (An empty `.herald` file is the explicit way to drain all sessions.)
+	// (An empty `.dk` file is the explicit way to drain all sessions.)
 	if (files.length === 0) return
 	const controls: Control[] = files.map((path) => {
 		const mtime = safeMtime(path)
 		// Macros expand IN MEMORY inside parse (the `@name` line stays in the file); only the
 		// single overall marker is ever written back.
 		const content = readFileSync(path, 'utf8')
-		const { lines, sessions, heralds } = parse(content, aliases, macros, widgets)
-		return { path, content, lines, sessions, heralds, mtime }
+		const { lines, sessions, duckies } = parse(content, aliases, macros, widgets)
+		return { path, content, lines, sessions, duckies, mtime }
 	})
 	// Merge into one global session list; the first file (alphabetical) to claim a
 	// tmux label wins, later duplicates are skipped so only one driver owns each session.
@@ -2642,7 +2649,7 @@ async function tick(rt: Rt) {
 		}
 
 	// ---- capture pass: mirror manually-typed prompts/commands back into the files ----
-	// Read each live session's per-lane capture logs, drop herald's own sends, and stage the
+	// Read each live session's per-lane capture logs, drop duckies's own sends, and stage the
 	// rest as the newest rows in the owning file. The inserts merge into the per-file rewrite
 	// below; the affected lanes skip dispatch this tick (their new [EXECUTING]/[DONE] row lands
 	// on the next parse). `commit` — advancing the send pools and consuming the logs — runs only
@@ -2661,7 +2668,7 @@ async function tick(rt: Rt) {
 		for (const c of controls) if (c.sessions.includes(base)) return c
 		return null
 	}
-	// Split a lane's raw captured lines into the ones herald sent (matched-and-removed from the
+	// Split a lane's raw captured lines into the ones duckies sent (matched-and-removed from the
 	// send pool, once each) and the ones a human typed.
 	const splitEcho = (raw: string[], pool: string[]): { manual: string[]; matched: string[] } => {
 		const copy = [...pool]
@@ -2832,7 +2839,7 @@ async function tick(rt: Rt) {
 			if (!DRY) {
 				// The lane's claude pane must be *tagged* to report turn completion. Absent ⇒ a
 				// partial spawn (n>1; claude1 came with the session); untagged ⇒ a tmux-resurrect
-				// restore stripped HERALD_LABEL/HERALD_PANE and the tag, so its Stop hook no-ops and
+				// restore stripped DUCKIES_LABEL/DUCKIES_PANE and the tag, so its Stop hook no-ops and
 				// the frontier prompt hangs at [EXECUTING]. Recreate it (self-heal) before dispatching
 				// — but never kill a claude that's mid-turn (a live pane that merely lost its tag):
 				// wait it out. Only when the lane actually needs the pane (pending or stuck work), so
@@ -2849,7 +2856,7 @@ async function tick(rt: Rt) {
 				lr.starting = false
 				// A `$N` lane isn't ready until it has a *tagged* shell<N> pane — the pane
 				// whose per-shell hook reports completion. Missing ⇒ partial spawn; untagged ⇒
-				// tmux-resurrect stripped HERALD_SHELL/HERALD_PANE (commands would hang at
+				// tmux-resurrect stripped DUCKIES_SHELL/DUCKIES_PANE (commands would hang at
 				// [EXECUTING]). Either way recreate it (self-heal) before dispatching.
 				if (laneHasShell(s, n) && (await taggedPane(label, 'shell', n)) === null) {
 					actions.push(() => repairShell(label, dir, n))
@@ -2936,25 +2943,25 @@ async function tick(rt: Rt) {
 		s.parts[0].showNowFired = s.showNowFired
 	}
 
-	// ---- herald pass: drive a visible `claude` window for each `HERALD:` directive ----
-	// A `HERALD:` directive runs a real claude in its own window in the `__herald-agent` session.
+	// ---- duckies pass: drive a visible `claude` window for each `DUCKIES:` directive ----
+	// A `DUCKIES:` directive runs a real claude in its own window in the `__duckies-agent` session.
 	// Lifecycle (recorded per key in rt): spawn the window → after the boot grace, type the directive
 	// → poll the agent's Stop hook → mirror its `-> ` summary below the directive (the durable
 	// done-marker; delete it to re-run). The window is then KEPT ALIVE as a live conversation — you
 	// can keep prompting it — and torn down only once it's sat idle (no Stop/prompt hook activity) for
-	// HERALD_AGENT_IDLE_MS; a fresh prompt bumps the state-file mtime and so resets that timer. A
-	// `!HERALD:` reveals the window once it's up. Spawn/prompt/reveal/teardown are queued as `actions`
-	// so they run past the mid-tick defer; the note/marker flow through buildHeraldOps (same defer).
+	// DUCKIES_AGENT_IDLE_MS; a fresh prompt bumps the state-file mtime and so resets that timer. A
+	// `!DUCKIES:` reveals the window once it's up. Spawn/prompt/reveal/teardown are queued as `actions`
+	// so they run past the mid-tick defer; the note/marker flow through buildDuckiesOps (same defer).
 	if (!DRY) {
 		const now = Date.now()
 		const seen = new Map<string, Map<string, number>>() // label → (directive → occurrence)
 		const liveKeys = new Set<string>() // `label\0key` still present this tick (for cancel-teardown)
 		for (const c of controls) {
 			// Session-attached directives use their session's label; top-level (column-0) ones resolve
-			// to the control-file basename (e.g. `app.herald` → `app`) so they still have an rt/state
+			// to the control-file basename (e.g. `app.dk` → `app`) so they still have an rt/state
 			// namespace and an agent-window name.
 			const fileLabel = basename(c.path, CONTROL_EXT)
-			for (const item of [...c.sessions.flatMap((s) => s.heralds), ...c.heralds]) {
+			for (const item of [...c.sessions.flatMap((s) => s.duckies), ...c.duckies]) {
 				{
 					if (!item.label) item.label = fileLabel
 					// Occurrence key is computed for EVERY directive (noted or not) so a directive keeps
@@ -2964,8 +2971,8 @@ async function tick(rt: Rt) {
 					seen.set(item.label, perLabel)
 					const occ = perLabel.get(item.directive) ?? 0
 					perLabel.set(item.directive, occ + 1)
-					const key = `${heraldHash(item.directive)}-${occ}`
-					const entry = rt[item.label]?.heralds?.[key]
+					const key = `${duckiesHash(item.directive)}-${occ}`
+					const entry = rt[item.label]?.duckies?.[key]
 					// Noted (done) AND no live window left ⇒ fully finished; nothing to do. (A noted
 					// directive whose window still lingers falls through to the idle-teardown below.)
 					if (!entry && item.note) continue
@@ -2973,38 +2980,38 @@ async function tick(rt: Rt) {
 					// All rt mutations live inside actions, which run only past the mid-tick defer — so a
 					// deferred tick leaves rt untouched and the phase simply retries next tick (no double-
 					// spawn, no phantom "sent"). Teardown deletes the record and kills the window together.
-					const teardown = () => actions.push(async () => (await teardownHeraldAgent(item.label, key), void delete rt[item.label]?.heralds?.[key]))
+					const teardown = () => actions.push(async () => (await teardownDuckiesAgent(item.label, key), void delete rt[item.label]?.duckies?.[key]))
 					if (!entry) {
 						// First sighting: create the window + launch claude (rt set in the action, past the
 						// defer). The directive is typed in a later tick, once claude has booted.
 						item.desiredKind = 'EXECUTING'
 						const e = (rt[item.label] ??= { starting: true, startedAt: 0, lanes: {} })
-						e.heralds ??= {}
-						actions.push(async () => (e.heralds![key] = { startedAt: Date.now(), sentAt: 0 }, void (await spawnHeraldAgent(item, key))))
+						e.duckies ??= {}
+						actions.push(async () => (e.duckies![key] = { startedAt: Date.now(), sentAt: 0 }, void (await spawnDuckiesAgent(item, key))))
 					} else if (entry.sentAt === 0) {
 						// Window up, claude booting: type the directive once the boot grace has passed.
 						item.desiredKind = 'EXECUTING'
-						if (now - entry.startedAt >= READY_MS) actions.push(async () => ((entry.sentAt = Date.now()), void (await sendHeraldDirective(item, key, c.path))))
+						if (now - entry.startedAt >= READY_MS) actions.push(async () => ((entry.sentAt = Date.now()), void (await sendDuckiesDirective(item, key, c.path))))
 					} else {
 						// Directive sent. `lastActivity` is the agent's state-file mtime (bumped by every
 						// Stop/prompt hook) — the inactivity clock; `pane`/`busy` read the live window.
-						const st = readStateFile(heraldFile(item.label, key, 'json'))
+						const st = readStateFile(duckiesFile(item.label, key, 'json'))
 						const lastActivity = st?.mtimeMs ?? entry.startedAt
-						const pane = await heraldAgentPane(key)
-						const busy = pane !== null && (await heraldAgentBusy(key))
-						const idleGone = pane === null || (now - lastActivity > HERALD_AGENT_IDLE_MS && !busy)
+						const pane = await duckiesAgentPane(key)
+						const busy = pane !== null && (await duckiesAgentBusy(key))
+						const idleGone = pane === null || (now - lastActivity > DUCKIES_AGENT_IDLE_MS && !busy)
 						if (!item.note) {
 							item.desiredKind = 'EXECUTING'
 							if (pane !== null && isTurnEnd(st, entry.sentAt) && !busy) {
 								// First turn finished: mirror the `-> ` summary (fallback so it isn't re-run) and
 								// drop the marker. The window is KEPT ALIVE — not torn down — so you can keep
 								// prompting it; the idle check below reaps it once it's been quiet long enough.
-								item.desiredNote = noteFromState(heraldFile(item.label, key, 'json')) ?? 'herald agent finished'
+								item.desiredNote = noteFromState(duckiesFile(item.label, key, 'json')) ?? 'duckies agent finished'
 								item.desiredKind = null
 							} else if (idleGone) {
 								// Window closed, or went idle for the TTL before ever finishing → give up, recording
 								// a note so the directive isn't relaunched (a stuck *busy* pane is left alone).
-								item.desiredNote = pane === null ? 'herald agent window closed' : 'herald agent timed out'
+								item.desiredNote = pane === null ? 'duckies agent window closed' : 'duckies agent timed out'
 								item.desiredKind = null
 								teardown()
 							}
@@ -3013,9 +3020,9 @@ async function tick(rt: Rt) {
 							teardown()
 						}
 					}
-					// A `!HERALD:` reveals the agent window once it exists; consumed (strip `!`) when revealed.
+					// A `!DUCKIES:` reveals the agent window once it exists; consumed (strip `!`) when revealed.
 					if (item.showNow && !item.showNowFired) {
-						const pane = await heraldAgentPane(key)
+						const pane = await duckiesAgentPane(key)
 						if (pane) {
 							item.showNowFired = true
 							actions.push(() => showSession(AGENT_SESSION_LABEL, undefined, pane))
@@ -3028,16 +3035,16 @@ async function tick(rt: Rt) {
 		// model this tick — kill its orphaned window and drop its record (in the action, past the
 		// defer, so a deferred tick retries rather than orphaning the window).
 		for (const [label, e] of Object.entries(rt)) {
-			for (const key of Object.keys(e.heralds ?? {})) {
+			for (const key of Object.keys(e.duckies ?? {})) {
 				if (liveKeys.has(`${label}\0${key}`)) continue
-				actions.push(async () => (await teardownHeraldAgent(label, key), void delete e.heralds![key]))
+				actions.push(async () => (await teardownDuckiesAgent(label, key), void delete e.duckies![key]))
 			}
 		}
 	}
 
 	// ---- widget pass: rerun each due `&name` widget and mirror its output back into the file ----
 	// A widget is a live display, not a queue item: a live (`&&`) widget reruns its commands every
-	// `interval` ms; a one-shot (`&`) widget runs once. Either way herald rewrites the `| ` block
+	// `interval` ms; a one-shot (`&`) widget runs once. Either way duckies rewrites the `| ` block
 	// below the `&name` line. Runs happen concurrently and are gated per widget by
 	// `rt[label].widgets[key].lastRun`; the resulting ops merge into the per-file rewrite
 	// below (so they respect the same mid-tick defer, and an unchanged display writes nothing).
@@ -3092,7 +3099,7 @@ async function tick(rt: Rt) {
 		}
 	}
 
-	// If the user edited any `.herald` file while we computed, defer: skip writes AND
+	// If the user edited any `.dk` file while we computed, defer: skip writes AND
 	// actions so nothing (e.g. a queued prompt) fires against a stale view.
 	for (const c of controls) {
 		if (safeMtime(c.path) !== c.mtime) {
@@ -3107,7 +3114,7 @@ async function tick(rt: Rt) {
 	// block deleted; the next tick reaps the vacated tmux session (and worktree) via reapTargets.
 	for (const c of controls) {
 		const { tops, all } = vacatedSessions(c.sessions, live)
-		const ops = [...buildOps(c.sessions, all), ...buildHeraldOps(c.heralds), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? []), ...(widgetOpsByPath.get(c.path) ?? [])]
+		const ops = [...buildOps(c.sessions, all), ...buildDuckiesOps(c.duckies), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? []), ...(widgetOpsByPath.get(c.path) ?? [])]
 		const newContent = applyOps(c.lines, ops).join('\n')
 		if (newContent !== c.content) atomicWrite(c.path, newContent)
 	}
@@ -3140,13 +3147,13 @@ const acquireLock = () => {
 				} catch {}
 			}
 			process.on('exit', release)
-			for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => (release(), process.exit(1)))
+			for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => (dash?.teardown(), release(), process.exit(1)))
 			return
 		} catch (e) {
 			if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
 			const owner = Number(readFileSync(LOCK, 'utf8').trim())
 			if (owner && owner !== process.pid && pidAlive(owner)) {
-				log(`another herald supervisor is already running (pid ${owner}); refusing to start a second`)
+				log(`another duckies supervisor is already running (pid ${owner}); refusing to start a second`)
 				process.exit(1)
 			}
 			try {
@@ -3176,14 +3183,26 @@ if (isMain)
 		const found = controlFiles()
 		if (DRY) {
 			// One-shot preview: show what a single tick would do, then exit.
-			log(`herald dry-run against ${found.length ? found.map((f) => basename(f)).join(', ') : `(no ${CONTROL_EXT} files found)`}`)
+			log(`duckies dry-run against ${found.length ? found.map((f) => basename(f)).join(', ') : `(no ${CONTROL_EXT} files found)`}`)
 			await tick(rt)
 			log('dry-run complete (no changes made)')
 			return
 		}
 		acquireLock()
-		log(`herald watching ${SINGLE_FILE ?? `${CONTROL_DIR}/*${CONTROL_EXT}`} (${found.length} file(s))`)
-		// Between ticks, sleep TICK_MS — but a `.herald` edit wakes us early (after a short
+		// Interactive dashboard: colorized log + popup menu (press `m`). Only in a real TTY; skipped in
+		// dry-run (returns above) and disabled with DUCKIES_TUI=0, so piped/headless runs log plainly.
+		if (process.stdin.isTTY && process.env.DUCKIES_TUI !== '0') {
+			const editor = process.env.DUCKIES_EDITOR || process.env.VISUAL || process.env.EDITOR || 'vi'
+			dash = startDashboard({
+				controlFiles,
+				configFiles: { aliases: ALIASES_FILE, macros: MACROS_FILE, widgets: WIDGETS_FILE },
+				editor,
+				colorEnabled: !process.env.NO_COLOR,
+			})
+			process.on('exit', () => dash?.teardown())
+		}
+		log(`duckies watching ${SINGLE_FILE ?? `${CONTROL_DIR}/*${CONTROL_EXT}`} (${found.length} file(s))${dash ? ' · press m for menu' : ''}`)
+		// Between ticks, sleep TICK_MS — but a `.dk` edit wakes us early (after a short
 		// WATCH_MS debounce that folds an editor's write+rename into one tick), so a saved `!`
 		// reveal reaches wezterm in tens of ms rather than up to a second. The poll remains the
 		// backstop for state/hook files and tmux, and for platforms where the watch doesn't fire.
@@ -3201,13 +3220,14 @@ if (isMain)
 			})
 		while (true) {
 			// A pending restart request (state/restart) is consumed here and the process exits with
-			// RESTART_EXIT, which the `nr start` wrapper (herald-run.ts) relaunches on — picking up any
+			// RESTART_EXIT, which the `nr start` wrapper (duckies-run.ts) relaunches on — picking up any
 			// edited source. tmux sessions are left running, so the fresh instance just reconciles them.
 			if (existsSync(RESTART_FILE)) {
 				try {
 					unlinkSync(RESTART_FILE)
 				} catch {}
 				log('restart requested — exiting for the wrapper to relaunch on current source')
+				dash?.teardown()
 				process.exit(RESTART_EXIT)
 			}
 			await tick(rt)
