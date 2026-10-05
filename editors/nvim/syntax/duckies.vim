@@ -1,0 +1,122 @@
+" Vim/Neovim syntax for duckies `.dk` control files. Grammar mirrors parse() in
+" duckies.ts and the Sublime grammar (duckies.sublime-syntax): column-0 lines are session
+" headers, `#` rows are comments, tab-indented lines are queue items (prompt / $command / show /
+" [status marker]). Status markers are white-on-red (override with `hi duckiesStatus …`).
+
+if exists('b:current_syntax')
+  finish
+endif
+
+" Comment: any row starting with `#` (at any indent, incl. column 0) is ignored.
+syntax match duckiesComment /^\s*#.*$/
+
+" Macro call: a `@name [args]` line the controller expands to a reusable block. A name char
+" must follow the `@`, so a `@@@…` body line never matches.
+syntax match duckiesMacro /^\s*@[0-9A-Za-z_-]\+\%(\s.*\)\?$/
+
+" Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines.
+" A single `&` runs once; `&&` reruns on the widget's interval. The `&name` line and the `| `
+" output lines directly beneath it form one block; the region ends at the first line that isn't a
+" `| ` continuation (so a *prompt* body `|` stays untouched). The region itself is transparent —
+" the two contained matches color from the sigil on (via \zs), so the leading tabs keep no
+" background.
+syntax region duckiesWidgetBlock transparent keepend start=/^\s*&\+[0-9A-Za-z_-]\+\%([:[:space:]].*\)\?$/ end=/^\ze\%(\t\+ *|\)\@!/ contains=duckiesWidget,duckiesWidgetOutput
+syntax match duckiesWidget /^\s*\zs&\+[0-9A-Za-z_-]\+\%([:[:space:]].*\)\?$/ contained
+syntax match duckiesWidgetOutput /^\t*\zs\t *|.*$/ contained
+
+" Session header: a column-0 (non-tab, non-`#`) line. A leading `!` = "show it now"
+" (matched by duckiesShowNow below).
+syntax match duckiesHeader /^[^\t#].*$/
+
+" Note: a `-> …` line duckies mirrors below a finished prompt (an inert one-line summary of
+" the turn). Linked to Comment so it reads like the `#` rows (see the highlight below).
+syntax match duckiesNote /^\t\+ *->.*$/
+
+" Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing repo).
+" Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
+" show/marker/note rows so only true labels match. Styled like a header (Identifier); a
+" leading `!` ("show now") is matched by duckiesShowNow below.
+syntax match duckiesWorktree /\c^\t\+ *\%([#@&:$[|%?]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
+
+" DUCKIES directive: a `DUCKIES: <text>` line (any indent, incl. column 0) runs a background agent to
+" edit the .dk files themselves. Case-sensitive (no \c) so prose never trips it; defined after
+" duckiesHeader/duckiesWorktree so it wins the whole line over those fallbacks (lowercase `duckies:`
+" stays a header/worktree as before).
+syntax match duckiesDirective /^[ \t]*DUCKIES:.*$/
+
+" Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane. Only the sigil is
+" highlighted (\zs starts the match after the indent); the text stays normal.
+syntax match duckiesPromptSigil /^\t\+ *\zs\c\%(prompt\)\?:\+\d*/
+
+" Command: `$`/`$$`/`$2` sigil, then the shell command text.
+syntax match duckiesCommandSigil /^\t\+ *\zs\$\+\d*/ nextgroup=duckiesCommandText
+syntax match duckiesCommandText /.*/ contained
+
+" Multiline prompt body: a `|` line continues the prompt above it (YAML block-scalar style).
+" Only the `|` sigil is highlighted; the body text stays normal, like a prompt.
+syntax match duckiesContSigil /^\t\+ *\zs|/
+
+" Show item: a bare `show` (any case) or a bare `!`.
+syntax match duckiesShow /^\t\+ *\c\%(show\|!\)\s*$/
+
+" Clear item: a bare `%`/`%%`/`%N` collapses its lane's completed run below it. Flagged on a
+" yellow background so it reads as an action mark.
+syntax match duckiesClear /^\t\+ *%\+\d*\s*$/
+
+" Status markers (controller-written): [EXECUTING] [DONE] [NEEDS ATTENTION] [NO DIR …] …
+syntax match duckiesStatus /^\t\+ *\[[^\]]*\]\s*$/
+
+" A failed `$command` ([ERROR]) — defined after duckiesStatus so it wins on the same line.
+syntax match duckiesError /^\t\+ *\c\[[^\]]*error[^\]]*\]\s*$/
+
+" [WAITING]: turn ended but backgrounded tasks will resume it — defined after duckiesStatus so
+" it wins on the same line, painting it distinct from the red 'done/executing' states.
+syntax match duckiesWaiting /^\t\+ *\c\[[^\]]*waiting[^\]]*\]\s*$/
+
+" Show-now line: any line whose first non-tab char is `!` reveals its pane/session now. The
+" whole line is flagged black-on-white, overriding the per-item rules above. Defined last so
+" it wins over the same-length header/worktree/show matches it overlaps.
+syntax match duckiesShowNow /^\s*!.*$/
+
+" Sleep scope: a header or worktree label whose first non-tab char is `?` is slept (tmux torn
+" down, conversation kept). Grey the WHOLE scope — the `?` line and every line indented deeper
+" than it. `\z(\t*\)` captures the `?` line's indent; the region ends (zero-width, so the ending
+" line is excluded) at the first line not indented past it, mirroring parse()'s cascade. Defined
+" last (like duckiesShowNow) with no `contains`, so it greys everything inside and wins on overlap.
+syntax region duckiesSleep keepend start=/^\z(\t*\)?/ end=/^\%(\z1\t\)\@!/me=s-1
+
+highlight default link duckiesComment      Comment
+highlight default link duckiesHeader       Identifier
+highlight default link duckiesWorktree     Identifier
+highlight default link duckiesPromptSigil  Statement
+highlight default link duckiesContSigil    Statement
+highlight default link duckiesCommandSigil Operator
+highlight default link duckiesCommandText  String
+highlight default link duckiesShow         Keyword
+" Linked to Comment so `-> …` notes read like the `#` rows, matching the Sublime setup.
+highlight default link duckiesNote Comment
+" White on red, matching the Sublime setup; `default` so a colorscheme can override.
+highlight default duckiesStatus guifg=#ffffff guibg=#dc0404 ctermfg=15 ctermbg=196
+" White on bright red for a failed command, matching the Sublime setup.
+highlight default duckiesError guifg=#ffffff guibg=#ff0000 ctermfg=15 ctermbg=196
+" Black on sky blue for a [WAITING] (backgrounded, will self-resume), matching the Sublime setup.
+highlight default duckiesWaiting guifg=#000000 guibg=#33c6ff ctermfg=0 ctermbg=45
+" Black on white for a leading-`!` show-now line; `default` so a colorscheme can override.
+highlight default duckiesShowNow guifg=#000000 guibg=#ffffff ctermfg=0 ctermbg=15
+" Black on yellow for a `%` clear-below line; `default` so a colorscheme can override.
+highlight default duckiesClear guifg=#000000 guibg=#ffe600 ctermfg=0 ctermbg=226
+" Macro calls: black on LINE green (#06C755); `default` so a colorscheme can override.
+highlight default duckiesMacro guifg=#000000 guibg=#06c755 ctermfg=black ctermbg=41
+" Widget calls + their `| ` output: white on dark grey (#333333), matching the tui/Sublime block;
+" `default` so a colorscheme can override. Two groups share the color (the leading tabs, matched by
+" neither, keep no background).
+highlight default duckiesWidget guifg=#ffffff guibg=#333333 ctermfg=15 ctermbg=236
+highlight default duckiesWidgetOutput guifg=#ffffff guibg=#333333 ctermfg=15 ctermbg=236
+" DUCKIES directives: white on violet (#8b5cf6), matching the tui/Sublime setup; a meta-command
+" that edits the .dk files themselves. `default` so a colorscheme can override.
+highlight default duckiesDirective guifg=#ffffff guibg=#8b5cf6 ctermfg=15 ctermbg=99
+" Slept `?` scopes: muted grey (#666666), matching the tui/Sublime setup; `default` so a
+" colorscheme can override.
+highlight default duckiesSleep guifg=#666666 ctermfg=242
+
+let b:current_syntax = 'duckies'

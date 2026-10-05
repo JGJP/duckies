@@ -1,75 +1,75 @@
 {
 	// Merges into whatever color scheme is active (Sublime combines the `rules` of every
-	// .sublime-color-scheme whose filename matches the active scheme). Colors the herald scopes a
+	// .sublime-color-scheme whose filename matches the active scheme). Colors the duckies scopes a
 	// syntax file alone can't reach — notably the backgrounds on status markers. Hexes are tuned to
 	// the "J Dark Matrix" scheme; retune to taste. The `-> ` note line is scoped
-	// `comment.line.note.herald` by the syntax, so it inherits the scheme's comment color for free
-	// (no rule needed here). Drop alongside herald.sublime-syntax.
+	// `comment.line.note.duckies` by the syntax, so it inherits the scheme's comment color for free
+	// (no rule needed here). Drop alongside duckies.sublime-syntax.
 	"rules": [
 		{
-			"scope": "entity.name.function.macro.herald",
+			"scope": "entity.name.function.macro.duckies",
 			"foreground": "#a6df95",
 		},
 		{
-			"scope": "entity.name.function.widget.herald, markup.other.widget.output.herald",
+			"scope": "entity.name.function.widget.duckies, markup.other.widget.output.duckies",
 			"foreground": "#ffffff",
 			"background": "#333333",
 		},
 		{
-			"scope": "keyword.operator.command.herald, string.unquoted.command.herald",
+			"scope": "keyword.operator.command.duckies, string.unquoted.command.duckies",
 			"foreground": "#3399ff",
 		},
 		{
-			"scope": "keyword.control.prompt.herald, meta.prompt.herald",
+			"scope": "keyword.control.prompt.duckies, meta.prompt.duckies",
 			"foreground": "#ffffff",
 		},
 		{
-			"scope": "entity.name.class.herald",
+			"scope": "entity.name.class.duckies",
 			"foreground": "#ffffff",
 			"font_style": "bold underline",
 		},
 		{
-			"scope": "constant.language.executing.herald",
+			"scope": "constant.language.executing.duckies",
 			"foreground": "#000000",
 			"background": "#ff791a",
 		},
 		{
-			"scope": "markup.inserted.done.herald, invalid.illegal.marker.herald",
+			"scope": "markup.inserted.done.duckies, invalid.illegal.marker.duckies",
 			"foreground": "#ffffff",
 			"background": "#dc0404",
 		},
 		{
-			"scope": "invalid.deprecated.attention.herald",
+			"scope": "invalid.deprecated.attention.duckies",
 			"foreground": "#000000",
 			"background": "#ffcc00",
 		},
 		{
-			"scope": "invalid.illegal.error.herald",
+			"scope": "invalid.illegal.error.duckies",
 			"foreground": "#ffffff",
 			"background": "#ff0000",
 		},
 		{
-			"scope": "markup.other.waiting.herald",
+			"scope": "markup.other.waiting.duckies",
 			"foreground": "#000000",
 			"background": "#33c6ff",
 		},
 		{
-			"scope": "markup.other.shownow.herald",
+			"scope": "markup.other.shownow.duckies",
 			"foreground": "#000000",
 			"background": "#ffffff",
 		},
 		{
-			"scope": "markup.other.clear.herald",
+			"scope": "markup.other.clear.duckies",
 			"foreground": "#000000",
 			"background": "#ffe600",
 		},
 		{
 			// A slept `?` scope — greyed out so a dormant header/worktree reads as inactive.
-			"scope": "markup.other.sleep.herald",
+			"scope": "markup.other.sleep.duckies",
 			"foreground": "#666666",
 		},
 		{
-			"scope": "markup.other.directive.herald",
+			"scope": "markup.other.directive.duckies",
 			"foreground": "#ffffff",
 			"background": "#8b5cf6",
 		},

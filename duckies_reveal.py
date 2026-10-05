@@ -1,30 +1,30 @@
-"""Sublime command: mark the current herald line for reveal, then save.
+"""Sublime command: mark the current duckies line for reveal, then save.
 
 Prepends a `!` to each selected line — right after its leading tabs, where parse() in
-herald.ts looks for the sigil — and saves the file. On the next tick the supervisor
+duckies.ts looks for the sigil — and saves the file. On the next tick the supervisor
 switches the attached tmux client to that item's pane (the shell for a `$command`, the
 claude pane for a prompt, the session for a header/worktree), then strips the `!` itself,
 so the mark is self-consuming. Idempotent: a line that already carries a leading `!` is
 left untouched, and saving still re-fires the reveal.
 
-Installed into Packages/User by setup.ts (alongside herald.sublime-syntax); Sublime
-auto-loads any *.py there. The command palette entry lives in herald.sublime-commands.
+Installed into Packages/User by setup.ts (alongside duckies.sublime-syntax); Sublime
+auto-loads any *.py there. The command palette entry lives in duckies.sublime-commands.
 """
 
 import sublime
 import sublime_plugin
 
 
-def _is_herald(view):
-    # Only offer the command in `.herald` buffers. Prefer the ST4 syntax scope; fall back
+def _is_duckies(view):
+    # Only offer the command in `.dk` buffers. Prefer the ST4 syntax scope; fall back
     # to the settings string so it still works on older builds / unassigned syntaxes.
     syntax = view.syntax() if hasattr(view, "syntax") else None
     if syntax is not None:
-        return syntax.scope == "source.herald"
-    return (view.settings().get("syntax") or "").lower().endswith("herald.sublime-syntax")
+        return syntax.scope == "source.duckies"
+    return (view.settings().get("syntax") or "").lower().endswith("duckies.sublime-syntax")
 
 
-class HeraldRevealCommand(sublime_plugin.TextCommand):
+class DuckiesRevealCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         view = self.view
         # The insert column for each line touched by a selection: just past its leading
@@ -44,7 +44,7 @@ class HeraldRevealCommand(sublime_plugin.TextCommand):
         sublime.set_timeout(lambda: view.run_command("save"), 0)
 
     def is_enabled(self):
-        return _is_herald(self.view)
+        return _is_duckies(self.view)
 
     def is_visible(self):
-        return _is_herald(self.view)
+        return _is_duckies(self.view)

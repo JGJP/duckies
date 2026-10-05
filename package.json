@@ -1,17 +1,17 @@
 {
-	"name": "herald",
+	"name": "duckies",
 	"version": "1.0.0",
-	"description": "Run and control many interactive Claude Code instances in tmux through plain-text .herald files.",
+	"description": "Run and control many interactive Claude Code instances in tmux through plain-text .dk files.",
 	"license": "MIT",
 	"author": "J Garcia",
 	"type": "module",
 	"repository": {
 		"type": "git",
-		"url": "git+https://codeberg.org/setter/herald.git"
+		"url": "git+https://codeberg.org/setter/duckies.git"
 	},
-	"homepage": "https://codeberg.org/setter/herald",
+	"homepage": "https://codeberg.org/setter/duckies",
 	"bugs": {
-		"url": "https://codeberg.org/setter/herald/issues"
+		"url": "https://codeberg.org/setter/duckies/issues"
 	},
 	"keywords": [
 		"claude",
@@ -27,10 +27,10 @@
 	},
 	"packageManager": "pnpm@11.8.0",
 	"scripts": {
-		"start": "tsx herald-run.ts",
-		"restart": "tsc --noEmit && tsx herald-restart.ts",
-		"herald": "tsx tui.ts",
-		"dry-run": "tsx herald.ts --dry-run",
+		"start": "tsx duckies-run.ts",
+		"restart": "tsc --noEmit && tsx duckies-restart.ts",
+		"duckies": "tsx tui.ts",
+		"dry-run": "tsx duckies.ts --dry-run",
 		"setup": "tsx setup.ts",
 		"test": "tsx test.ts",
 		"type-check": "tsc --noEmit"

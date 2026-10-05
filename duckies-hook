@@ -1,0 +1,19 @@
+#!/bin/sh
+# Claude Code Stop/Notification hook for duckies.
+# Guarded by $DUCKIES_LABEL so it is a no-op for normal (non-duckies) Claude sessions.
+# Identity ($DUCKIES_LABEL) and $DUCKIES_STATE are inherited from the launching `claude`.
+# The event name is passed as $1; the controller reads the file's mtime for timing.
+[ -n "$DUCKIES_LABEL" ] || exit 0
+dir="${DUCKIES_STATE:-$HOME/_dev/duckies/state}"
+mkdir -p "$dir"
+# DUCKIES_PANE (set on numbered claude panes, `:2`/`::` …) suffixes the state file so each
+# lane's claude reports independently; lane 1 (unset) keeps the bare `<label>.json`.
+suffix="${DUCKIES_PANE:+.$DUCKIES_PANE}"
+input=$(cat)
+printf '{"event":"%s","raw":%s}\n' "$1" "$input" > "$dir/$DUCKIES_LABEL$suffix.json"
+# On a submitted prompt, also append the raw payload (one JSON object per line) to the lane's
+# capture log, so the controller can mirror manually-typed prompts back into the `.dk`
+# file. It filters out its own sends by the prompt text, so echoing our own prompts is fine.
+if [ "$1" = UserPromptSubmit ]; then
+	printf '%s\n' "$input" >> "$dir/$DUCKIES_LABEL$suffix.in"
+fi

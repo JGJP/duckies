@@ -1,0 +1,6 @@
+[
+	{
+		"caption": "Duckies: Reveal this line's pane (add ! and save)",
+		"command": "duckies_reveal"
+	}
+]

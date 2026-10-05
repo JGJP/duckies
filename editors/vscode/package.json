@@ -1,9 +1,9 @@
 {
-	"name": "herald-syntax",
-	"displayName": "herald (.herald)",
-	"description": "Syntax highlighting for herald .herald control files",
+	"name": "duckies-syntax",
+	"displayName": "duckies (.dk)",
+	"description": "Syntax highlighting for duckies .dk control files",
 	"version": "0.1.0",
-	"publisher": "herald",
+	"publisher": "duckies",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.75.0"
@@ -14,48 +14,48 @@
 	"contributes": {
 		"languages": [
 			{
-				"id": "herald",
+				"id": "duckies",
 				"aliases": [
-					"herald"
+					"duckies"
 				],
 				"extensions": [
-					".herald"
+					".dk"
 				],
 				"configuration": "./language-configuration.json"
 			}
 		],
 		"grammars": [
 			{
-				"language": "herald",
-				"scopeName": "source.herald",
-				"path": "./syntaxes/herald.tmLanguage.json"
+				"language": "duckies",
+				"scopeName": "source.duckies",
+				"path": "./syntaxes/duckies.tmLanguage.json"
 			}
 		],
 		"configurationDefaults": {
 			"editor.tokenColorCustomizations": {
 				"textMateRules": [
 					{
-						"scope": "markup.other.shownow.herald",
+						"scope": "markup.other.shownow.duckies",
 						"settings": { "foreground": "#000000", "background": "#FFFFFF" }
 					},
 					{
-						"scope": "markup.other.clear.herald",
+						"scope": "markup.other.clear.duckies",
 						"settings": { "foreground": "#000000", "background": "#FFE600" }
 					},
 					{
-						"scope": "markup.other.sleep.herald",
+						"scope": "markup.other.sleep.duckies",
 						"settings": { "foreground": "#666666" }
 					},
 					{
-						"scope": "markup.other.waiting.herald",
+						"scope": "markup.other.waiting.duckies",
 						"settings": { "foreground": "#000000", "background": "#33C6FF" }
 					},
 					{
-						"scope": "entity.name.function.widget.herald, markup.other.widget.output.herald",
+						"scope": "entity.name.function.widget.duckies, markup.other.widget.output.duckies",
 						"settings": { "foreground": "#FFFFFF", "background": "#333333" }
 					},
 					{
-						"scope": "markup.other.directive.herald",
+						"scope": "markup.other.directive.duckies",
 						"settings": { "foreground": "#FFFFFF", "background": "#8B5CF6" }
 					}
 				]

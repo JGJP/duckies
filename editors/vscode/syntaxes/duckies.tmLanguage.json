@@ -1,39 +1,39 @@
 {
 	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-	"name": "herald",
-	"scopeName": "source.herald",
+	"name": "duckies",
+	"scopeName": "source.duckies",
 	"patterns": [
 		{
-			"comment": "Show-now line: any line whose first non-tab char is `!` reveals its pane/session now. Matched first so the whole line reads as one scope the theme flags black-on-white, overriding the per-item coloring below — the only form of `!` herald recognises. A `!` anywhere else in a line is ordinary text.",
+			"comment": "Show-now line: any line whose first non-tab char is `!` reveals its pane/session now. Matched first so the whole line reads as one scope the theme flags black-on-white, overriding the per-item coloring below — the only form of `!` duckies recognises. A `!` anywhere else in a line is ordinary text.",
 			"match": "^[ \\t]*!.*$",
-			"name": "markup.other.shownow.herald"
+			"name": "markup.other.shownow.duckies"
 		},
 		{
-			"comment": "Sleep scope: a header or worktree label whose first non-tab char is `?` is slept (herald tears its tmux down but keeps the conversation). Greys the WHOLE scope — the `?` line and every line indented deeper than it — so the dormant block reads as inactive. `\\1` captures the `?` line's indent; the region ends at the first line not indented past it (the next sibling/header), mirroring parse()'s cascade. Matched before the item/label rules; no sigil item starts with `?`.",
+			"comment": "Sleep scope: a header or worktree label whose first non-tab char is `?` is slept (duckies tears its tmux down but keeps the conversation). Greys the WHOLE scope — the `?` line and every line indented deeper than it — so the dormant block reads as inactive. `\\1` captures the `?` line's indent; the region ends at the first line not indented past it (the next sibling/header), mirroring parse()'s cascade. Matched before the item/label rules; no sigil item starts with `?`.",
 			"begin": "^(\\t*)\\?.*$",
 			"end": "^(?!\\1\\t)",
-			"name": "markup.other.sleep.herald"
+			"name": "markup.other.sleep.duckies"
 		},
 		{
 			"comment": "Comment: any row starting with `#` (at any indent, incl. column 0) is ignored.",
 			"match": "^\\s*((#)[^\\n]*)$",
 			"captures": {
-				"1": { "name": "comment.line.number-sign.herald" },
-				"2": { "name": "punctuation.definition.comment.herald" }
+				"1": { "name": "comment.line.number-sign.duckies" },
+				"2": { "name": "punctuation.definition.comment.duckies" }
 			}
 		},
 		{
 			"comment": "Macro call: a `@name [args]` line the controller expands to a reusable block. A name char must follow the `@`, so a `@@@…` body line never matches.",
 			"match": "^[ \\t]*(@[\\w-]+(?:[ \\t].*)?)$",
 			"captures": {
-				"1": { "name": "entity.name.function.macro.herald" }
+				"1": { "name": "entity.name.function.macro.duckies" }
 			}
 		},
 		{
-			"comment": "HERALD directive: a `HERALD: <text>` line (any indent, incl. column 0) runs a background agent to edit the .herald files themselves. Case-sensitive so ordinary prose never trips it; matched before the session-header/worktree fallback so it isn't read as a label.",
-			"match": "^[ \\t]*(HERALD:.*)$",
+			"comment": "DUCKIES directive: a `DUCKIES: <text>` line (any indent, incl. column 0) runs a background agent to edit the .dk files themselves. Case-sensitive so ordinary prose never trips it; matched before the session-header/worktree fallback so it isn't read as a label.",
+			"match": "^[ \\t]*(DUCKIES:.*)$",
 			"captures": {
-				"1": { "name": "markup.other.directive.herald" }
+				"1": { "name": "markup.other.directive.duckies" }
 			}
 		},
 		{
@@ -44,13 +44,13 @@
 				{
 					"match": "^[ \\t]*(&+[\\w-]+(?:[ \\t:].*)?)$",
 					"captures": {
-						"1": { "name": "entity.name.function.widget.herald" }
+						"1": { "name": "entity.name.function.widget.duckies" }
 					}
 				},
 				{
 					"match": "^\\t*(\\t[ ]*\\|.*)$",
 					"captures": {
-						"1": { "name": "markup.other.widget.output.herald" }
+						"1": { "name": "markup.other.widget.output.duckies" }
 					}
 				}
 			]
@@ -59,99 +59,99 @@
 			"comment": "Prompt: `prompt:` or the `:` shorthand; `::`/`:2` select the lane/pane.",
 			"match": "^\\t+ *((?i:prompt)?:+\\d*)(.*)$",
 			"captures": {
-				"1": { "name": "keyword.control.prompt.herald" },
-				"2": { "name": "meta.prompt.herald" }
+				"1": { "name": "keyword.control.prompt.duckies" },
+				"2": { "name": "meta.prompt.duckies" }
 			}
 		},
 		{
 			"comment": "Multiline prompt body: a `|` line continues the prompt above it (YAML block-scalar style), so a pasted body is never mistaken for a worktree.",
 			"match": "^\\t+ *(\\|)(.*)$",
 			"captures": {
-				"1": { "name": "keyword.control.prompt.herald" },
-				"2": { "name": "meta.prompt.herald" }
+				"1": { "name": "keyword.control.prompt.duckies" },
+				"2": { "name": "meta.prompt.duckies" }
 			}
 		},
 		{
 			"comment": "Command: `$`/`$$`/`$2` runs in the shell window; the rest is the command.",
 			"match": "^\\t+ *(\\$+\\d*)(.*)$",
 			"captures": {
-				"1": { "name": "keyword.operator.command.herald" },
-				"2": { "name": "string.unquoted.command.herald" }
+				"1": { "name": "keyword.operator.command.duckies" },
+				"2": { "name": "string.unquoted.command.duckies" }
 			}
 		},
 		{
 			"comment": "Show item: a bare `show` (any case) or a bare `!` brings the session on screen.",
 			"match": "^\\t+ *(?i:(show|!))[ ]*$",
 			"captures": {
-				"1": { "name": "keyword.control.show.herald" }
+				"1": { "name": "keyword.control.show.duckies" }
 			}
 		},
 		{
 			"comment": "Clear item: a bare `%`/`%%`/`%N` collapses its lane's completed run below it. Matched before the worktree fallback so `%` isn't read as a label; the theme gives it a yellow background so it stands out as an action mark.",
 			"match": "^\\t+ *(%+\\d*)[ ]*$",
 			"captures": {
-				"1": { "name": "markup.other.clear.herald" }
+				"1": { "name": "markup.other.clear.duckies" }
 			}
 		},
 		{
 			"comment": "Status marker: [EXECUTING] (active). A leading `!` (reveal now) is handled by the show-now rule above.",
 			"match": "^\\t+ *((?i:\\[[^\\]]*executing[^\\]]*\\]))[ ]*$",
 			"captures": {
-				"1": { "name": "constant.language.executing.herald" }
+				"1": { "name": "constant.language.executing.duckies" }
 			}
 		},
 		{
 			"comment": "Status marker: [DONE] (success).",
 			"match": "^\\t+ *((?i:\\[[^\\]]*done[^\\]]*\\]))[ ]*$",
 			"captures": {
-				"1": { "name": "markup.inserted.done.herald" }
+				"1": { "name": "markup.inserted.done.duckies" }
 			}
 		},
 		{
 			"comment": "Status marker: [NEEDS ATTENTION] (alarm).",
 			"match": "^\\t+ *((?i:\\[[^\\]]*attention[^\\]]*\\]))[ ]*$",
 			"captures": {
-				"1": { "name": "invalid.deprecated.attention.herald" }
+				"1": { "name": "invalid.deprecated.attention.duckies" }
 			}
 		},
 		{
 			"comment": "Status marker: [ERROR] (a failed $command; halts the lane).",
 			"match": "^\\t+ *((?i:\\[[^\\]]*error[^\\]]*\\]))[ ]*$",
 			"captures": {
-				"1": { "name": "invalid.illegal.error.herald" }
+				"1": { "name": "invalid.illegal.error.duckies" }
 			}
 		},
 		{
 			"comment": "Status marker: [WAITING] (turn ended, but backgrounded tasks will resume claude on their own).",
 			"match": "^\\t+ *((?i:\\[[^\\]]*waiting[^\\]]*\\]))[ ]*$",
 			"captures": {
-				"1": { "name": "markup.other.waiting.herald" }
+				"1": { "name": "markup.other.waiting.duckies" }
 			}
 		},
 		{
 			"comment": "Any other bracketed marker (e.g. [NO DIR …], [DUPLICATE]) is a session marker.",
 			"match": "^\\t+ *(\\[[^\\n]*\\])[ ]*$",
 			"captures": {
-				"1": { "name": "invalid.illegal.marker.herald" }
+				"1": { "name": "invalid.illegal.marker.duckies" }
 			}
 		},
 		{
-			"comment": "Note: a `-> …` line herald mirrors below a finished prompt (an inert one-line summary of the turn). Matched before the worktree fallback so the non-sigil line isn't read as a worktree label. Scoped as a comment so it inherits the theme's comment styling, matching the `#` rows above.",
+			"comment": "Note: a `-> …` line duckies mirrors below a finished prompt (an inert one-line summary of the turn). Matched before the worktree fallback so the non-sigil line isn't read as a worktree label. Scoped as a comment so it inherits the theme's comment styling, matching the `#` rows above.",
 			"match": "^\\t+ *->.*$",
-			"name": "comment.line.note.herald"
+			"name": "comment.line.note.duckies"
 		},
 		{
 			"comment": "Worktree label: a tab-indented, non-sigil line (a git worktree of the enclosing repo). Mirrors parse()'s fallback branch; styled as a class name, the same scope as the repo header it stands in for. A leading `!` (show it now) is handled by the show-now rule above.",
 			"match": "^\\t+ *(\\S[^\\n]*?)[ ]*$",
 			"captures": {
-				"1": { "name": "entity.name.class.herald" }
+				"1": { "name": "entity.name.class.duckies" }
 			}
 		},
 		{
 			"comment": "Session header: a column-0 line. A leading `!` (switch to it now) is handled by the show-now rule above.",
 			"match": "^(?![\\t\\n])([^\\n]*?)[ ]*$",
 			"captures": {
-				"1": { "name": "entity.name.class.herald" }
+				"1": { "name": "entity.name.class.duckies" }
 			}
 		}
 	]
