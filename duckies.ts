@@ -1959,6 +1959,14 @@ async function doSpawn(label: string, dir: string, resumeId?: string) {
 async function addWorktreeAndSpawn(label: string, base: string, dir: string, cfg: { cmd?: string[]; copy?: string[] } = {}, resumeId?: string) {
 	log(`worktree add ${dir} (from ${base})`)
 	if (DRY) return
+	// A background removal for this same base (a just-reaped worktree) may still hold the repo's
+	// worktree lock; `git worktree add` would fail against it. Wait out the base's removal chain —
+	// rare, only on a delete + re-add in quick succession.
+	const pending = pendingWorktreeRemoval(base)
+	if (pending) {
+		log(`worktree add ${dir}: waiting on a background removal in ${base}`)
+		await pending
+	}
 	const tm = $({ nothrow: true, quiet: true })
 	await tm`mkdir -p ${dirname(dir)}`
 	const r = await tm`git -C ${base} worktree add --detach ${dir}`
@@ -2049,6 +2057,39 @@ async function removeWorktree(label: string, base: string, dir: string) {
 		}
 	} catch {}
 }
+
+// `git worktree remove` scans the whole tree, so it never runs inline in a tick's action pass —
+// the reap schedules it here and the tick moves on. Jobs run detached from the tick, SERIALIZED
+// PER BASE REPO (git locks its worktrees admin dir, so two removes in one repo — or a remove
+// racing an add — would fail on the lock) but in parallel across different bases. A supervisor
+// restart orphans the git child; it finishes on its own.
+const worktreeRemoving = new Set<string>() // dirs with a removal queued or running (dedup guard)
+const removalQueues = new Map<string, Promise<unknown>>() // base → tail of its removal chain
+
+// Schedule `job` after anything already queued for `base`, without awaiting it. Returns the chain
+// tail so tests can observe completion; the tick ignores it (fire-and-forget). Exported for tests.
+export function backgroundWorktreeJob(base: string, dir: string, job: () => Promise<unknown>): Promise<unknown> {
+	if (DRY) return Promise.resolve()
+	if (worktreeRemoving.has(dir)) return removalQueues.get(base) ?? Promise.resolve()
+	worktreeRemoving.add(dir)
+	const tail = removalQueues.get(base) ?? Promise.resolve()
+	const next = tail
+		.then(() => job())
+		.catch(() => {}) // removeWorktree already logs its failures; never wedge the base's queue
+		.finally(() => worktreeRemoving.delete(dir))
+	removalQueues.set(base, next)
+	// Drop a fully drained chain so the map doesn't grow an entry per repo forever. Only when this
+	// tail is still the latest (a newer job would have replaced it), and only after its job ran —
+	// so a later job that chained off this tail keeps its ordering either way.
+	void next.finally(() => {
+		if (removalQueues.get(base) === next) removalQueues.delete(base)
+	})
+	return next
+}
+
+// The tail of a base's removal chain, if a background removal is pending for it. addWorktreeAndSpawn
+// awaits this before `git worktree add` so a delete+re-add in quick succession can't race the lock.
+export const pendingWorktreeRemoval = (base: string): Promise<unknown> | undefined => removalQueues.get(base)
 
 // Recreate lane `n`'s shell window so command completion is reported again. Two cases:
 // a partial/absent pane, or a tmux-resurrect restore that brought the shell back stripped
@@ -3008,9 +3049,16 @@ async function tick(rt: Rt) {
 
 	for (const { label, worktree } of reapTargets(live, modelLabels, RESERVED, rt)) {
 		actions.push(() => doKill(label, survivor))
-		// If this was a worktree, remove it from disk too (after the kill frees its cwd), so
-		// worktrees are torn down alongside their session.
-		if (worktree) actions.push(() => removeWorktree(label, worktree.base, worktree.dir))
+		// If this was a worktree, remove it from disk too. The scheduling action still runs after
+		// the kill (so the removal starts with the cwd freed), but the removal itself is slow
+		// (`git worktree remove` scans the whole tree), so it runs DETACHED from this tick — queued
+		// per base repo (see backgroundWorktreeJob) instead of blocking every session's tick.
+		if (worktree) {
+			const wt = worktree
+			actions.push(async () => {
+				void backgroundWorktreeJob(wt.base, wt.dir, () => removeWorktree(label, wt.base, wt.dir))
+			})
+		}
 		rmAllDoneFiles(label)
 		delete rt[label]
 	}

@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './duckies'
+import { aliasWorktree, applyOps, backgroundWorktreeJob, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './duckies'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 import { appendLabel, colorizeLog } from './duckies-menu'
 
@@ -1656,6 +1656,43 @@ check(
 	check('appendLabel adds a blank separator before the new header', appendLabel('app\n', 'visa') === 'app\n\nvisa\n', JSON.stringify(appendLabel('app\n', 'visa')))
 	check('appendLabel on empty content is just the header', appendLabel('', 'visa') === 'visa\n')
 	check('appendLabel collapses trailing newlines (no double blank)', appendLabel('app\n\n\n', 'visa') === 'app\n\nvisa\n', JSON.stringify(appendLabel('app\n\n\n', 'visa')))
+}
+
+// ---- background worktree removal: detached, serialized per base, parallel across bases ---------
+// backgroundWorktreeJob schedules a slow `git worktree remove` OFF the tick's awaited action pass:
+// jobs on the same base repo run one at a time in queue order (git locks its worktrees admin dir),
+// jobs on different bases proceed concurrently, and a failed job never wedges its base's queue.
+// Tests pass spy jobs and await the returned chain tail; the tick ignores it (fire-and-forget).
+{
+	const seq: string[] = []
+	let releaseA: () => void = () => {}
+	// base1's job blocks until released; base2's job must complete WITHOUT waiting for it.
+	const pA = backgroundWorktreeJob('/base1', '/base1-worktrees/x', () => new Promise<void>((r) => (releaseA = () => (seq.push('a'), r()))))
+	const pB = backgroundWorktreeJob('/base2', '/base2-worktrees/y', async () => void seq.push('b'))
+	await pB
+	check('a removal on another base runs in parallel, not behind a stuck one', JSON.stringify(seq) === JSON.stringify(['b']), JSON.stringify(seq))
+	releaseA()
+	await pA
+	// A second base1 job queued now must run after base1's first job finished.
+	const pC = backgroundWorktreeJob('/base1', '/base1-worktrees/z', async () => void seq.push('c'))
+	await pC
+	check('removals on the same base serialize in queue order', JSON.stringify(seq) === JSON.stringify(['b', 'a', 'c']), JSON.stringify(seq))
+
+	// Queueing the same dir twice runs it once (a delete + re-delete can't double-remove).
+	let dupCount = 0
+	await Promise.all([
+		backgroundWorktreeJob('/base3', '/base3-worktrees/dup', async () => void dupCount++),
+		backgroundWorktreeJob('/base3', '/base3-worktrees/dup', async () => void dupCount++),
+	])
+	check('a removal queued twice for the same dir runs once', dupCount === 1, String(dupCount))
+
+	// A rejecting job is swallowed (removeWorktree logs its own failures): the base's queue lives on.
+	const after: string[] = []
+	await backgroundWorktreeJob('/base4', '/base4-worktrees/boom', async () => {
+		throw new Error('boom')
+	})
+	await backgroundWorktreeJob('/base4', '/base4-worktrees/next', async () => void after.push('next'))
+	check('a failed removal does not wedge the base queue', after.length === 1, JSON.stringify(after))
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)

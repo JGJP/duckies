@@ -265,7 +265,10 @@ moonbase-2
   with its tmux session: the supervisor `git worktree remove --force`s it. Like the tmux kill
   this is unconditional — uncommitted or untracked changes in the worktree are discarded — so
   commit or move anything worth keeping first. Once a repo's last worktree goes, its now-empty
-  `<repo>-worktrees` folder is removed too. A worktree line with no children is inert.
+  `<repo>-worktrees` folder is removed too. The removal runs **in the background** (it scans the
+  whole tree, so it would otherwise stall every session's tick) — removals are serialized per
+  base repo but parallel across repos, and a delete-then-re-add waits for the pending removal
+  rather than racing git's lock. A worktree line with no children is inert.
   - If the base **isn't a git repo** (a plain labeled directory), it can't be worktree'd, so
     the same `<base>-worktrees/<name>` path is instead a **symlink to the base** — the session
     runs directly on the original files (no isolation; `worktree/copy`/`worktree/cmd` setup is
