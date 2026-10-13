@@ -800,8 +800,11 @@ function render() {
 		const flag = (newFile ? ' [New]' : '') + (modified() ? ' [+]' : '')
 		const leftStr = ` ${tag || name + flag}`
 		const rightStr = `${message ? message + '  ' : ''}${cy + 1}:${cx + 1}  ${lines.length}L `
-		const pad = Math.max(1, cols - leftStr.length - rightStr.length)
-		buf += C.status + leftStr + ' '.repeat(pad) + rightStr + C.reset
+		// Fit to exactly `cols`: when they'd overflow, keep the position (right) and truncate the name
+		// (left); else pad between. Never exceed cols — a wider line would wrap and scroll the bottom
+		// row, knocking the cursor a line off its text.
+		const status = leftStr.length + rightStr.length >= cols ? (leftStr.slice(0, Math.max(0, cols - rightStr.length)) + rightStr).slice(0, cols) : leftStr + ' '.repeat(cols - leftStr.length - rightStr.length) + rightStr
+		buf += C.status + status + C.reset
 	}
 	// place & shape the cursor
 	if (mode === 'command') {
@@ -1425,7 +1428,7 @@ function sync() {
 
 // ── bootstrap ─────────────────────────────────────────────────────────────────────
 function restore() {
-	out.write('\x1b[2 q\x1b[?25h\x1b[?1049l') // reset cursor shape, show, leave alt screen
+	out.write('\x1b[?7h\x1b[2 q\x1b[?25h\x1b[?1049l') // re-enable autowrap, reset cursor shape, show, leave alt screen
 	if (process.stdin.isTTY) process.stdin.setRawMode(false)
 }
 
@@ -1462,7 +1465,8 @@ function main() {
 
 	process.stdin.setRawMode(true)
 	process.stdin.resume()
-	out.write('\x1b[?1049h') // alt screen
+	out.write('\x1b[?1049h\x1b[?7l') // alt screen; disable autowrap so a full-width line never wraps
+	// and scrolls the screen (which would leave the absolutely-positioned cursor a row off its text).
 	render()
 
 	process.stdin.on('data', (chunk: Buffer) => {
