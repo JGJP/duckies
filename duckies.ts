@@ -1153,7 +1153,7 @@ export function applyOps(lines: string[], ops: Op[]): string[] {
 // work under yet, or a deliberately-empty note, is left alone. Returns the top-most removable
 // sessions (delete their whole block, headerIdx..lastChildIdx) and the full removed set (buildOps
 // skips these, since their markers are about to vanish). Pure, so it's unit-testable.
-export function vacatedSessions(sessions: Session[], liveLabels: Set<string>): { tops: Session[]; all: Set<Session> } {
+export function vacatedSessions(sessions: Session[], liveLabels: Set<string>, attached: Set<string> = new Set()): { tops: Session[]; all: Set<Session> } {
 	const ordered = [...sessions].sort((a, b) => a.headerIdx - b.headerIdx)
 	const depth = (s: Session) => (s.indent ?? '').length
 	const parent = new Map<Session, Session | null>()
@@ -1176,7 +1176,9 @@ export function vacatedSessions(sessions: Session[], liveLabels: Set<string>): {
 		// A widget or an unfinished `DUCKIES:` directive makes a session "occupied" the same way a
 		// prompt does — a live display or a still-running directive must not be reaped from under its
 		// line. A directive that already has its `-> ` note is done, so it no longer holds the session.
-		if (s.prompts.length === 0 && s.widgets.length === 0 && s.duckies.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)!) removed.add(s)
+		// A session a tmux client is currently viewing is never reaped out from under you — so a just
+		// -created empty session persists while you're in it (it's cleaned up once you switch away).
+		if (s.prompts.length === 0 && s.widgets.length === 0 && s.duckies.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)! && !attached.has(s.label)) removed.add(s)
 	}
 	const tops = ordered.filter((s) => removed.has(s) && !(parent.get(s) && removed.has(parent.get(s)!)))
 	return { tops, all: removed }
@@ -1688,6 +1690,19 @@ function viewCmd(label: string): string {
 
 async function listTmux(): Promise<Set<string>> {
 	const r = await $({ nothrow: true, quiet: true })`tmux list-sessions -F '#{session_name}'`
+	const out = new Set<string>()
+	for (const line of r.stdout.split('\n')) {
+		const n = line.trim()
+		if (n.startsWith(PREFIX)) out.add(n.slice(PREFIX.length))
+	}
+	return out
+}
+
+// Labels a tmux client is currently attached to (a session you're looking at). vacatedSessions never
+// reaps one of these, so a freshly created empty session (a menu-added `!label` with no queue yet)
+// survives while you're in it — and is cleaned up only once you switch away still-empty.
+async function attachedLabels(): Promise<Set<string>> {
+	const r = await $({ nothrow: true, quiet: true })`tmux list-clients -F '#{client_session}'`
 	const out = new Set<string>()
 	for (const line of r.stdout.split('\n')) {
 		const n = line.trim()
@@ -2286,6 +2301,27 @@ export function controlFiles(): string[] {
 		})
 }
 
+// Find an already-defined session for a typed menu label, resolving it through aliases the same
+// way a header line would. Scans every control file so a duplicate is caught wherever it lives.
+// Returns the file + 1-based header line + resolved label, or null when the label is new.
+export function locateLabel(header: string): { file: string; line: number; label: string } | null {
+	const aliases = loadAliases()
+	const macros = loadMacros()
+	const widgets = loadWidgets()
+	const { label } = resolveTarget(header.trim().replace(/^[!?]\s*/, ''), aliases)
+	for (const file of controlFiles()) {
+		let sessions
+		try {
+			sessions = parse(readFileSync(file, 'utf8'), aliases, macros, widgets).sessions
+		} catch {
+			continue
+		}
+		const s = sessions.find((x) => x.label === label)
+		if (s) return { file, line: s.headerIdx + 1, label }
+	}
+	return null
+}
+
 // Watch the control dir (not each file — a directory watch survives atomicWrite's temp-file
 // rename, which swaps the inode a per-file watch would lose) and invoke `onChange` whenever a
 // `.dk` file is touched. Lets the poll loop react to a save — e.g. a `!` reveal — within
@@ -2770,7 +2806,9 @@ async function tick(rt: Rt) {
 		for (const s of sessions) {
 			if (RESERVED.has(s.label) || !live.has(s.label)) continue
 			if (s.showNow && !s.showNowFired) {
-				await showSession(s.label, frontierWindow(s, rt[s.label]?.lanes))
+				// No queued frontier (e.g. a freshly added `!label` with nothing under it yet) → land on
+				// the session's claude window rather than whatever tmux left active.
+				await showSession(s.label, frontierWindow(s, rt[s.label]?.lanes) ?? { kind: 'claude', n: 1 })
 				s.showNowFired = true
 			}
 			for (const p of s.prompts) {
@@ -3251,8 +3289,11 @@ async function tick(rt: Rt) {
 	// lines, and applyOps orders them so the inserts and any marker deletes don't collide.
 	// A drained-to-nothing label (its finished worktree, then its now-empty repo) has its whole
 	// block deleted; the next tick reaps the vacated tmux session (and worktree) via reapTargets.
+	// Queried after the reveal pass above, so a session we just switched the client to reads as
+	// attached and is spared reaping (don't tear down what you're looking at).
+	const attached = await attachedLabels()
 	for (const c of controls) {
-		const { tops, all } = vacatedSessions(c.sessions, live)
+		const { tops, all } = vacatedSessions(c.sessions, live, attached)
 		const ops = [...buildOps(c.sessions, all), ...buildDuckiesOps(c.duckies), ...vacateOps(tops, c.lines), ...(captureOps.get(c.path) ?? []), ...(widgetOpsByPath.get(c.path) ?? [])]
 		const newContent = applyOps(c.lines, ops).join('\n')
 		if (newContent !== c.content) atomicWrite(c.path, newContent)
@@ -3331,12 +3372,12 @@ if (isMain)
 		// Interactive dashboard: colorized log + popup menu (press `m`). Only in a real TTY; skipped in
 		// dry-run (returns above) and disabled with DUCKIES_TUI=0, so piped/headless runs log plainly.
 		if (process.stdin.isTTY && process.env.DUCKIES_TUI !== '0') {
-			const editor = process.env.DUCKIES_EDITOR || process.env.VISUAL || process.env.EDITOR || 'vi'
 			dash = startDashboard({
 				controlFiles,
-				configFiles: { aliases: ALIASES_FILE, macros: MACROS_FILE, widgets: WIDGETS_FILE },
-				editor,
+				configFiles: { aliases: ALIASES_FILE, macros: MACROS_FILE, widgets: WIDGETS_FILE, templates: TEMPLATES_FILE },
 				colorEnabled: !process.env.NO_COLOR,
+				locateLabel,
+				revealSession: (label) => void showSession(label),
 			})
 			process.on('exit', () => dash?.teardown())
 		}

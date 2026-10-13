@@ -58,14 +58,15 @@ pnpm duckies work.dk  # …or edit a specific control file
 When `pnpm start` runs in a real terminal, its log is colorized by action/severity and a popup menu is
 available — press **`m`**. From the menu (arrow keys + enter, or the shortcut letter):
 
-- **`a`/`c`/`w`** — open `aliases.yaml` / `macros.yaml` / `widgets.yaml` in `$EDITOR`.
+- **`a`/`c`/`w`/`t`** — open `aliases.yaml` / `macros.yaml` / `widgets.yaml` / `templates.yaml` in Sublime Text.
 - **`n`** — add a new label: pick one of your `.dk` files, type the label, and it's appended as a new
-  session header, then that file opens in `$EDITOR`. The supervisor spawns the session on its next tick.
+  session header prefixed with `!`. The supervisor spawns the tmux session on its next tick and switches
+  your client to its claude window (then consumes the `!`) — no editor; you land straight in the session.
+  (If the label already exists, it reveals that session's tmux and opens its `.dk` in Sublime instead.)
 
-Editing happens in your terminal `$EDITOR` (e.g. `nvim`); the supervisor keeps reconciling in the
-background while you edit — log output is held and flushed when the editor exits. `Esc` closes the menu;
-`Ctrl-C` stops the supervisor (restoring the terminal). The menu/coloring auto-disable when stdout isn't a
-TTY (dry-run, piped) or when `DUCKIES_TUI=0`.
+Editing opens in the Sublime GUI (`subl`), so it never takes over the terminal — the supervisor keeps
+reconciling and the log keeps scrolling. `Esc` closes the menu; `Ctrl-C` stops the supervisor (restoring
+the terminal). The menu/coloring auto-disable when stdout isn't a TTY (dry-run, piped) or `DUCKIES_TUI=0`.
 
 ## Quickstart
 
@@ -864,8 +865,6 @@ Notes:
 - `DUCKIES_READY_MS` — boot grace before the first prompt is sent (default 6000).
 - `DUCKIES_TUI` — set to `0` to disable the interactive supervisor menu + log coloring (plain log only).
   Also auto-disabled when stdout isn't a TTY.
-- `DUCKIES_EDITOR` — editor the supervisor menu opens config/`.dk` files with; default
-  `$VISUAL` / `$EDITOR` / `vi`.
 - `TYPESAFE_API_KEY` — enables the Jev attention check: when a Claude turn ends cleanly, its final
   message is judged by [TypeSafe](https://typesafe.ai)'s Jev model, and if it reads as *waiting on
   you* (a question, follow-ups pending a go-ahead, a blocked/needs-a-decision ending) the lane is

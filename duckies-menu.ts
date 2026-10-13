@@ -1,8 +1,9 @@
 // Interactive dashboard for the supervisor's own terminal: colorizes the scrolling log and adds a
-// key-triggered popup menu (edit the aliases/macros/widgets YAML in $EDITOR, or add a label to a
-// chosen `.dk` file). No alt-screen — the log keeps scrolling; the menu is an in-place block drawn
-// below it and erased on close. The supervisor NEVER stops ticking while the menu or editor is open;
-// only log OUTPUT is held (buffered) so stdout stays clean for the overlay/editor, then flushed.
+// key-triggered popup menu (edit the aliases/macros/widgets/templates YAML in Sublime Text, or add a label to
+// a chosen `.dk` file). No alt-screen — the log keeps scrolling; the menu is an in-place block drawn
+// below it and erased on close. The supervisor NEVER stops ticking while the menu is open; only log
+// OUTPUT is held (buffered) so stdout stays clean for the overlay, then flushed. Editing opens in the
+// Sublime GUI (non-blocking), so it never takes over the terminal.
 //
 // Wired from duckies.ts: `log()` routes through `emit()`; `teardown()` restores the terminal on every
 // exit path (quit, restart-exit, signal) so the relaunched instance inherits a clean screen.
@@ -12,9 +13,14 @@ import { basename, dirname } from 'node:path'
 
 export interface DashboardOpts {
 	controlFiles: () => string[]
-	configFiles: { aliases: string; macros: string; widgets: string }
-	editor: string
+	configFiles: { aliases: string; macros: string; widgets: string; templates: string }
 	colorEnabled: boolean
+	// Locate an already-defined session for a typed label (resolved through aliases), so a "new
+	// label" that duplicates an existing one reveals it instead of appending a clashing header.
+	// Returns the `.dk` file + 1-based header line + the resolved tmux label, or null if unseen.
+	locateLabel: (header: string) => { file: string; line: number; label: string } | null
+	// Switch the watching tmux client to an existing session's window (the supervisor's showSession).
+	revealSession: (label: string) => void
 }
 
 // Compact log-oriented palette (256-color). Distinct from tui.ts's syntax palette — this colors log
@@ -175,6 +181,7 @@ export function startDashboard(opts: DashboardOpts) {
 		{ key: 'a', label: 'Edit aliases', file: () => opts.configFiles.aliases },
 		{ key: 'c', label: 'Edit macros', file: () => opts.configFiles.macros },
 		{ key: 'w', label: 'Edit widgets', file: () => opts.configFiles.widgets },
+		{ key: 't', label: 'Edit templates', file: () => opts.configFiles.templates },
 		{ key: 'n', label: 'New label…', file: null },
 	]
 
@@ -221,35 +228,18 @@ export function startDashboard(opts: DashboardOpts) {
 		flush()
 	}
 
-	// Open a file in $EDITOR without stopping the supervisor: hand the keyboard to the child (pause our
-	// stdin, leave raw mode) while Node keeps ticking; buffer log output so the editor's screen stays
-	// clean. On the child's exit, re-enter raw mode and flush what accrued.
-	const openEditor = (file: string) => {
+	// Open a file in Sublime Text — a GUI editor, so launch it detached and return to the scrolling
+	// log at once; no need to suspend the supervisor's terminal the way a terminal editor would. With
+	// a line, jump to it via subl's `path:line` form. The parent dir is ensured so saving a new file
+	// works. Closes the overlay first (Sublime opens in its own window).
+	const openInSublime = (file: string, line?: number) => {
 		try {
 			mkdirSync(dirname(file), { recursive: true })
 		} catch {}
-		overlayStart()
-		modal = true
-		mode = 'idle'
-		showCursor()
-		try {
-			if (process.stdin.isTTY) process.stdin.setRawMode(false)
-		} catch {}
-		process.stdin.pause()
-		const child = spawn(opts.editor, [file], { stdio: 'inherit' })
-		const done = () => {
-			process.stdin.resume()
-			try {
-				if (process.stdin.isTTY) process.stdin.setRawMode(true)
-			} catch {}
-			modal = false
-			flush()
-		}
-		child.on('exit', done)
-		child.on('error', (e) => {
-			emit(`WARN editor ${opts.editor} failed: ${(e as Error).message}`)
-			done()
-		})
+		const child = spawn('subl', [line ? `${file}:${line}` : file], { stdio: 'ignore', detached: true })
+		child.on('error', (e) => emit(`WARN subl failed: ${(e as Error).message}`))
+		child.unref()
+		closeOverlay()
 	}
 
 	const activateMenu = (i: number) => {
@@ -261,21 +251,32 @@ export function startDashboard(opts: DashboardOpts) {
 			drawPick()
 			return
 		}
-		openEditor(it.file())
+		openInSublime(it.file())
 	}
 
 	const commitInput = () => {
 		const label = inputText.trim()
 		if (!label) return closeOverlay()
+		// Already a session with this label? Don't append a clashing duplicate — reveal its tmux and
+		// open its `.dk` at the header line instead (openEditor resets the overlay, like the edit items).
+		const existing = opts.locateLabel(label)
+		if (existing) {
+			opts.revealSession(existing.label)
+			emit(`menu: ${label} already exists in ${basename(existing.file)} — revealing its tmux + opening in sublime`)
+			openInSublime(existing.file, existing.line)
+			return
+		}
 		let content = ''
 		try {
 			content = readFileSync(inputFile, 'utf8')
 		} catch {}
 		const tmp = `${inputFile}.tmp`
-		writeFileSync(tmp, appendLabel(content, label))
+		// `!` prefix: the supervisor spawns the session and switches your tmux client to its claude
+		// window once it's up, then consumes the `!`. No editor — you land straight inside the session.
+		writeFileSync(tmp, appendLabel(content, `!${label}`))
 		renameSync(tmp, inputFile)
-		emit(`menu: added label ${label} to ${basename(inputFile)}`)
-		openEditor(inputFile)
+		emit(`menu: added ${label} to ${basename(inputFile)} — spawning + revealing its claude window`)
+		closeOverlay()
 	}
 
 	const teardown = () => {

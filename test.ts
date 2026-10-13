@@ -1151,6 +1151,9 @@ check('frontier window is the executing prompt\'s claude', fw('!alpha\n\t: work\
 check('executing wins over a done item below it', fw('!alpha\n\t: work\n\t\t[EXECUTING]\n\t$ built\n\t\t[DONE]\n') === 'claude', String(fw('!alpha\n\t: work\n\t\t[EXECUTING]\n\t$ built\n\t\t[DONE]\n')))
 check('with nothing executing, the last [DONE] wins', fw('!alpha\n\t$ built\n\t\t[DONE]\n') === 'shell', String(fw('!alpha\n\t$ built\n\t\t[DONE]\n')))
 check('frontier window is undefined when nothing has run', fw('!alpha\n\t: pending\n') === undefined, String(fw('!alpha\n\t: pending\n')))
+// A freshly menu-added `!label` has no queue items, so frontierWindow is undefined — the reveal
+// pass falls back to the claude window so you land in the session rather than its last-active pane.
+check('a bare labelled session has no frontier window', fw('!alpha\n') === undefined, String(fw('!alpha\n')))
 
 // A `!` in front of a running @macro reveals the window of the step it's actually on — its
 // shell while a `$` step runs, its claude pane while a prompt step runs — using the lane's
@@ -1524,6 +1527,12 @@ check(
 	// A widget makes its session non-vacatable even with no prompts (a live display isn't reaped).
 	const vac = parse('repo\n\t&pr\n', {}, {}, widgets)
 	check('a widget-only session is not vacated', vacatedSessions(vac.sessions, new Set(['repo'])).all.size === 0)
+
+	// A bare live session (a just-added `!label`) is vacated once empty — unless a tmux client is
+	// attached to it, in which case it's spared so it isn't reaped out from under you.
+	const bare = parse('scratch\n')
+	check('a bare live session is vacated', vacatedSessions(bare.sessions, new Set(['scratch'])).all.size === 1)
+	check('a bare live session a client is viewing is spared', vacatedSessions(bare.sessions, new Set(['scratch']), new Set(['scratch'])).all.size === 0)
 
 	// stripAnsi drops SGR colors and OSC 8 hyperlinks (real ghprs output) but keeps the visible
 	// text, the link label, and UTF-8 glyphs — so widget output renders in a plain text editor.
