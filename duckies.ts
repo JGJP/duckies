@@ -2487,6 +2487,13 @@ const isBlockingNotify = (st: PlanIO['state'], sentAt: number): boolean => !!st 
 // The turn ended: an explicit Stop, or the post-Stop idle nudge (which stands in when Stop was
 // never observed — e.g. it was overwritten in the state file by the later idle notification).
 const isTurnEnd = (st: PlanIO['state'], sentAt: number): boolean => !!st && (st.event === 'Stop' || isIdleNudge(st)) && st.mtimeMs > sentAt
+// Claude is actively working again: a freshly submitted prompt (the human answered a blocking
+// question) OR a tool call (the human approved a permission prompt — which fires no other hook, so
+// a stale `permission_prompt` Notification would otherwise linger and re-latch [NEEDS ATTENTION]
+// for the rest of the turn whenever the pane's spinner is unreadable, e.g. extended-thinking).
+// Either supersedes a blocking notification and clears the lane back to [EXECUTING].
+const isResume = (st: PlanIO['state'], sentAt: number): boolean =>
+	!!st && (st.event === 'UserPromptSubmit' || st.event === 'PreToolUse') && st.mtimeMs > sentAt
 
 export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 	const out: Dispatch[] = []
@@ -2580,7 +2587,7 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 			else if (isBlockingNotify(io.state, rt.sentAt)) active.desiredKind = 'ATTENTION'
 			else if (io.paneBackground === true) active.desiredKind = 'WAITING'
 			else if (isTurnEnd(io.state, rt.sentAt)) advance()
-			else if (io.state && io.state.event === 'UserPromptSubmit' && io.state.mtimeMs > rt.sentAt) active.desiredKind = 'EXECUTING'
+			else if (isResume(io.state, rt.sentAt)) active.desiredKind = 'EXECUTING'
 		} else if (active.isCmd) {
 			if (io.cmdDoneMtime !== null && io.cmdDoneMtime > (rt.cmdSentAt ?? 0)) {
 				if (io.cmdDoneExit) {
@@ -2635,10 +2642,13 @@ export function planQueue(s: Session, rt: QueueRt, io: PlanIO): Dispatch[] {
 				active.desiredKind = 'DONE'
 				drainUp(active.order, active)
 			}
-		} else if (io.state && io.state.event === 'UserPromptSubmit' && io.state.mtimeMs > rt.sentAt) {
-			// A prompt was submitted into the pane — the user answered a blocking
-			// question — so Claude is working again: clear [NEEDS ATTENTION] back to
-			// [EXECUTING]. (A no-op while already executing.)
+		} else if (isResume(io.state, rt.sentAt)) {
+			// Claude is working again — the human either submitted a prompt (answered a blocking
+			// question) or approved a permission prompt (a PreToolUse fired as the tool ran). Either
+			// clears [NEEDS ATTENTION] back to [EXECUTING]. Approving a permission prompt fires no
+			// other hook, so without the PreToolUse signal the stale `permission_prompt` Notification
+			// lingers and re-latches ATTENTION whenever the spinner is unreadable (extended-thinking).
+			// (A no-op while already executing.)
 			active.desiredKind = 'EXECUTING'
 		}
 	} else if (io.paneBusy === true && doneFrontier) {

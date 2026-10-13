@@ -488,6 +488,29 @@ const answered = (() => {
 })()
 check('answering [NEEDS ATTENTION] flips it back to [EXECUTING], then Stop -> [DONE]', answered.flagged && answered.executing && answered.content.includes('[DONE]'), JSON.stringify(answered))
 
+// Approving a permission prompt fires no Stop/Notification/UserPromptSubmit — only a PreToolUse as
+// the approved tool runs. That must clear [NEEDS ATTENTION] back to [EXECUTING] even while the pane
+// spinner is unreadable (paneBusy:false, e.g. an extended-thinking resume). Without it the stale
+// permission Notification re-latches ATTENTION for the rest of the turn. Regression for
+// app:e2e-persist showing NEEDS ATTENTION while genuinely executing.
+const permissionApproved = (() => {
+	let content = 'alpha\n\t: fix the bug\n'
+	const rt = { starting: false, startedAt: 0, sentAt: 0, cmdSentAt: 0, prevPromptCount: 1 }
+	const step = (io: Parameters<typeof planQueue>[2]) => {
+		const { lines, sessions } = parse(content)
+		planQueue(sessions[0], rt, io)
+		content = applyOps(lines, buildOps(sessions)).join('\n')
+	}
+	step({ now: 100, state: null, cmdDoneMtime: null }) // dispatch
+	step({ now: 200, state: { event: 'Notification', notify: 'permission_prompt', mtimeMs: 200 }, cmdDoneMtime: null, paneBusy: false }) // permission prompt blocks
+	const flagged = content.includes('[NEEDS ATTENTION]')
+	step({ now: 300, state: { event: 'PreToolUse', mtimeMs: 300 }, cmdDoneMtime: null, paneBusy: false }) // approved -> tool runs
+	const executing = content.includes('[EXECUTING]') && !content.includes('[NEEDS ATTENTION]')
+	step({ now: 400, state: { event: 'Stop', mtimeMs: 400 }, cmdDoneMtime: null }) // finishes
+	return { flagged, executing, content }
+})()
+check('approving a permission prompt (PreToolUse) clears [NEEDS ATTENTION] back to [EXECUTING]', permissionApproved.flagged && permissionApproved.executing && permissionApproved.content.includes('[DONE]'), JSON.stringify(permissionApproved))
+
 // Jev attention: a turn that ends with `needsAttention` set (the caller judged its final message as
 // "waiting on the human") latches [NEEDS ATTENTION] and holds the lane instead of draining to [DONE];
 // answering (UserPromptSubmit) clears it back to [EXECUTING]. Without the flag the same Stop is a

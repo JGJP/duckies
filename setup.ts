@@ -118,9 +118,11 @@ void fire(async () => {
 	//     isn't set up on this machine).
 	installSublimeSyntax()
 
-	// 2. Merge Stop + Notification + UserPromptSubmit hooks into global settings.json
-	//    without clobbering existing hooks. UserPromptSubmit lets the controller flip
-	//    a [NEEDS ATTENTION] prompt back to [EXECUTING] once the user answers it.
+	// 2. Merge Stop + Notification + UserPromptSubmit + PreToolUse hooks into global settings.json
+	//    without clobbering existing hooks. UserPromptSubmit lets the controller flip a
+	//    [NEEDS ATTENTION] prompt back to [EXECUTING] once the user answers a blocking question;
+	//    PreToolUse does the same once the user approves a permission prompt (which fires no other
+	//    hook, so the stale permission Notification would otherwise linger for the rest of the turn).
 	if (!existsSync(settingsPath)) {
 		throw new Error(`settings.json not found at ${settingsPath}`)
 	}
@@ -130,7 +132,7 @@ void fire(async () => {
 	settings.hooks ??= {}
 
 	let changed = false
-	for (const event of ['Stop', 'Notification', 'UserPromptSubmit'] as const) {
+	for (const event of ['Stop', 'Notification', 'UserPromptSubmit', 'PreToolUse'] as const) {
 		settings.hooks[event] ??= []
 		if (alreadyInstalled(settings.hooks[event])) {
 			console.log(`${event}: duckies-hook already installed, skipping`)
