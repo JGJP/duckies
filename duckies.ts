@@ -220,6 +220,28 @@ export interface MacroStep {
 	isCmd: boolean
 }
 
+// Optional YAML file of `name: |<multiline block>` templates. A `>name args` line in a `.dk`
+// file is a TEMPLATE call: unlike a macro (`@name`, which expands in memory to steps run
+// silently while the file keeps the one `@name` line), a template is a paste — the call line is
+// physically replaced in the file by the body (arg-filled, re-indented under the call site), so
+// the injected prompts/commands become ordinary visible rows the drain runs like any other.
+const TEMPLATES_FILE = process.env.DUCKIES_TEMPLATES ? resolve(process.env.DUCKIES_TEMPLATES) : join(CONFIG_DIR, 'templates.yaml')
+export type Templates = Record<string, string>
+
+// Load the `<name>`→body template map, tolerating a missing/empty/malformed file (same shape as
+// macros).
+export function loadTemplates(): Templates {
+	try {
+		const parsed = YAML.parse(readFileSync(TEMPLATES_FILE, 'utf8'))
+		if (!parsed || typeof parsed !== 'object') return {}
+		const out: Templates = {}
+		for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') out[k] = v
+		return out
+	} catch {
+		return {}
+	}
+}
+
 // Optional YAML file of widgets: `name: { interval: <ms>, commands: [<shell cmd>, …] }`. An
 // `&name` line in a `.dk` file is a status display — duckies runs its commands and mirrors
 // their combined stdout back into the file as `| `-prefixed lines indented below the `&name` line.
@@ -267,6 +289,48 @@ const MACRO_RE = /^([ \t]*)@([\w-]+)(?:[ \t]+(.*\S))?[ \t]*$/
 const WIDGET_RE = /^(&+)([\w-]+)(.*)$/
 const macroArgs = (s: string): string[] => (s.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((a) => (/^"[^]*"$|^'[^]*'$/.test(a) ? a.slice(1, -1) : a))
 const fillArgs = (text: string, args: string[]): string => text.replace(/\{\*\}/g, args.join(' ')).replace(/\{(\d+)\}/g, (_, d) => args[+d] ?? '')
+// A `>name [args…]` line (any indent) is a TEMPLATE call — same `>`-sigil shape as a macro's `@`,
+// but it resolves against the template map and is a text paste, not a queue item. A name char must
+// follow the `>`, so a prompt body or a `->` note never matches. `{0}`/`{1}`/`{*}` fill args
+// exactly like a macro.
+const TEMPLATE_RE = /^([ \t]*)>([\w-]+)(?:[ \t]+(.*\S))?[ \t]*$/
+// Re-indent a template body to the `.dk` tab convention. Authors write the body with ordinary YAML
+// indentation — usually spaces — but `.dk` nests with ONE TAB per level, so a space-indented body
+// pasted verbatim wouldn't conform. Detect the body's own indent unit (its smallest positive
+// leading-space run; a tab-indented body counts one tab per level directly) and re-express each
+// line's depth as that many tabs, then prefix the call site's own indent so the whole block lands
+// under it. Blank lines stay blank (no stray indent).
+export function reindentBody(body: string, callIndent: string): string[] {
+	const lines = body.split('\n')
+	const leads = lines.filter((l) => l.trim() !== '').map((l) => l.match(/^[ \t]*/)![0])
+	const usesTabs = leads.some((s) => s.includes('\t'))
+	const unit = usesTabs ? 1 : Math.min(Infinity, ...leads.map((s) => s.length).filter((n) => n > 0))
+	return lines.map((l) => {
+		if (l.trim() === '') return ''
+		const lead = l.match(/^[ \t]*/)![0]
+		const depth = usesTabs ? (lead.match(/\t/g) ?? []).length : unit === Infinity ? 0 : Math.floor(lead.length / unit)
+		return callIndent + '\t'.repeat(depth) + l.slice(lead.length)
+	})
+}
+// Expand every `>name args` call in a `.dk` file's raw text: replace each call line with the named
+// template's body, arg-filled and re-indented (see reindentBody) so the pasted rows nest with tabs
+// under the call site. An unknown name is left untouched (a typo stays visible). Returns the input
+// unchanged when there's nothing to expand, so the tick can cheaply detect "no injection this pass".
+export function expandTemplates(content: string, templates: Templates): string {
+	const lines = content.split('\n')
+	const out: string[] = []
+	let changed = false
+	for (const line of lines) {
+		const m = line.match(TEMPLATE_RE)
+		if (m && templates[m[2]] !== undefined) {
+			changed = true
+			const body = fillArgs(templates[m[2]], m[3] ? macroArgs(m[3]) : []).replace(/\n+$/, '')
+			out.push(...reindentBody(body, m[1]))
+		} else out.push(line)
+	}
+	return changed ? out.join('\n') : content
+}
+
 // Expand a macro body into steps, in RUN order: fill args, drop blank and `#` comment lines,
 // classify each remaining line as a `$`command or a prompt, and reverse so they run
 // bottom-to-top like every other duckies queue (the body's last line runs first). A step's
@@ -2606,6 +2670,7 @@ async function tick(rt: Rt) {
 	const aliases = loadAliases()
 	const macros = loadMacros()
 	const widgets = loadWidgets()
+	const templates = loadTemplates()
 	// Read + parse every `.dk` file. Each file's sessions carry line indices into
 	// that file's own `lines`, so markers are written back to the file they came from.
 	const files = controlFiles()
@@ -2613,6 +2678,22 @@ async function tick(rt: Rt) {
 	// nothing rather than tearing down every live session over a missing/renamed file.
 	// (An empty `.dk` file is the explicit way to drain all sessions.)
 	if (files.length === 0) return
+	// ---- template expansion pass: physically inject `>name args` calls into the files ----
+	// Before anything else looks at the queue, rewrite any template call lines into their bodies
+	// (see expandTemplates). This mutates the `.dk` file itself, so we write and return: the write
+	// wakes the watcher and the next tick parses+drives the now-ordinary injected rows, exactly as
+	// if the user had typed them. In dry-run atomicWrite only logs, so we fall through unchanged.
+	if (!DRY) {
+		let injected = false
+		for (const path of files) {
+			const content = readFileSync(path, 'utf8')
+			const next = expandTemplates(content, templates)
+			if (next === content) continue
+			atomicWrite(path, next)
+			injected = true
+		}
+		if (injected) return
+	}
 	const controls: Control[] = files.map((path) => {
 		const mtime = safeMtime(path)
 		// Macros expand IN MEMORY inside parse (the `@name` line stays in the file); only the

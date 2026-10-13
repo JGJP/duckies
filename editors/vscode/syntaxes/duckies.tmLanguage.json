@@ -30,6 +30,13 @@
 			}
 		},
 		{
+			"comment": "Template call: a `>name [args]` line the controller PASTES — it physically replaces this line in the file with the named body, so the injected rows become ordinary visible items. A name char must follow the `>` (so a `->` note never matches); matched before the session-header/worktree fallback so `>name` isn't read as a label.",
+			"match": "^[ \\t]*(>[\\w-]+(?:[ \\t].*)?)$",
+			"captures": {
+				"1": { "name": "entity.name.function.template.duckies" }
+			}
+		},
+		{
 			"comment": "DUCKIES directive: a `DUCKIES: <text>` line (any indent, incl. column 0) runs a background agent to edit the .dk files themselves. Case-sensitive so ordinary prose never trips it; matched before the session-header/worktree fallback so it isn't read as a label.",
 			"match": "^[ \\t]*(DUCKIES:.*)$",
 			"captures": {

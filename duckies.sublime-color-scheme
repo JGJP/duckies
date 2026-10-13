@@ -11,6 +11,11 @@
 			"foreground": "#a6df95",
 		},
 		{
+			// A `<template>` paste call — magenta, distinct from the green macro it resembles.
+			"scope": "entity.name.function.template.duckies",
+			"foreground": "#e68fdd",
+		},
+		{
 			"scope": "entity.name.function.widget.duckies, markup.other.widget.output.duckies",
 			"foreground": "#ffffff",
 			"background": "#333333",

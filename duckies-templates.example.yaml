@@ -1,0 +1,36 @@
+# Copy to ~/.config/duckies/templates.yaml. Each key is a template name; a `>name` line on
+# its own in a .dk file is PASTED — the supervisor physically replaces the `>name` line with
+# this body, so the injected rows become ordinary, visible, editable queue items (a `:` prompt,
+# a `$` command, a `#` barrier, a nested worktree, …). This is the difference from a macro
+# (`@name`), which expands in memory and runs its steps silently while the file keeps the one
+# `@name` line — a template leaves real rows behind instead.
+#
+# INDENTATION: author the body with ordinary YAML indentation — just indent a nested row further
+# than its parent (spaces are fine). duckies re-indents it to the .dk tab convention (one tab per
+# level) and prefixes the call's own indent, so the same template pastes correctly at top level,
+# under a label, or under a worktree. (Tabs in the body work too; either style is normalized.)
+#
+# ORDER: the pasted rows are plain .dk content, so they still drain BOTTOM-TO-TOP like everything
+# else — put the first thing to run at the bottom of the body. Add an indented `#` barrier row to
+# hold the injected work back until you delete it.
+#
+# Arguments: pass them after the name — `>handle-pr 2011` or `>review 2500 "auth refactor"`.
+# In the body, {0} {1} … are the positional args (0-based; quote a value to keep its spaces), {*}
+# is all of them, and a missing one is blank. Braces (not $1) so they never clash with a `$2`/`:2`
+# lane sigil in the body.
+
+handle-pr: |
+  : /handle-pr-comments {0}
+  $ gh pr checkout {0}
+
+# A template can inject a whole worktree block with its own nested work. `>feature 1234 login`
+# under a repo header pastes a `pr-1234` worktree with two queued prompts inside it.
+feature: |
+  pr-{0}
+    : implement the fix for issue {0} — {*}
+    $ git fetch origin
+
+# Hold the injected work back by default with a `#` barrier — delete it when you're ready.
+draft: |
+  : {*}
+  # not ready — delete this line to release the task above

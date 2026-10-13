@@ -682,6 +682,46 @@ core-iac
 spaces), `{*}` is all of them space-joined, and a missing one expands blank. Braces are
 used (not `$1`) so a placeholder never clashes with a `$2`/`:2` lane sigil inside the block.
 
+## Templates (`~/.config/duckies/templates.yaml`)
+
+Optional. A YAML map of `name: |<multiline block>`, like macros — but a `>name args` line
+is a **paste**, not a background item. When the supervisor sees one it **physically replaces
+that line** in the `.dk` file with the template's body, so the injected rows become ordinary,
+**visible, editable** queue items. Copy `duckies-templates.example.yaml` to
+`~/.config/duckies/templates.yaml` to start.
+
+```yaml
+handle-pr: |
+  : /handle-pr-comments {0}
+  $ gh pr checkout {0}
+```
+
+Type `>handle-pr 2011` under a session and the next tick rewrites it in place to:
+
+```
+myrepo
+	: /handle-pr-comments 2011
+	$ gh pr checkout 2011
+```
+
+This is the difference from a **macro** (`@name`): a macro keeps its one `@name` line and
+expands **in memory**, running its steps silently under a single marker; a template leaves
+**real rows** behind that you can see, reorder, or delete — then drain and get markers like
+anything you'd typed by hand.
+
+- **Any level.** Author the body with ordinary YAML indentation (spaces are fine) — duckies
+  re-indents it to the `.dk` tab convention (one tab per level) and prefixes the call's own
+  indent, so the same template pastes correctly at **top level**, under a **label**, or under a
+  **worktree**. Indent a row further than its parent to nest it one level deeper — a template can
+  even inject a whole worktree block with its own queued work.
+- **Still bottom-to-top.** The pasted rows are plain `.dk` content, so they drain
+  bottom-to-top like everything else — put the first thing to run at the **bottom** of the
+  body, and add an indented `#` barrier row to hold the injected work back until you delete it.
+- **Arguments** work exactly like macros: `>review 2500 "auth refactor"` fills `{0}`/`{1}`/`{*}`
+  (0-based, quote to keep spaces, missing = blank).
+- An **unknown** `>name` is left untouched (a typo stays a visible inert line). A name char must
+  follow the `>`, so a `->` note or a `>` inside a prompt is never a call — the call is the whole line.
+
 ## Widgets (`~/.config/duckies/widgets.yaml`)
 
 Optional. A **status display**, defined like a macro but with a **list of commands** and
@@ -801,10 +841,11 @@ Notes:
 
 - `DUCKIES_DIR` — scan a different directory for `*.dk` files instead of `~/.config/duckies/duckspaces`.
 - `DUCKIES_FILE` — single-file mode: watch exactly this one file (ignores the `*.dk` scan).
-- `DUCKIES_CONFIG_DIR` — where aliases/macros/widgets are read from; default `~/.config/duckies`.
+- `DUCKIES_CONFIG_DIR` — where aliases/macros/widgets/templates are read from; default `~/.config/duckies`.
 - `DUCKIES_ALIASES` — read aliases from a different file instead of `~/.config/duckies/aliases.yaml`.
 - `DUCKIES_MACROS` — read macros from a different file instead of `~/.config/duckies/macros.yaml`.
 - `DUCKIES_WIDGETS` — read widgets from a different file instead of `~/.config/duckies/widgets.yaml`.
+- `DUCKIES_TEMPLATES` — read templates from a different file instead of `~/.config/duckies/templates.yaml`.
 - `DUCKIES_DEV_DIR` — where a bare session name resolves (`<dir>/<name>`); default `~/_dev`.
 - `DUCKIES_AGENT_CMD` — the command launched in each claude pane; default `claude` (point it at
   a wrapper or a different agent CLI). Also used for the `DUCKIES:` agent window.

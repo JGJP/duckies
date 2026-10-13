@@ -14,6 +14,12 @@ syntax match duckiesComment /^\s*#.*$/
 " must follow the `@`, so a `@@@…` body line never matches.
 syntax match duckiesMacro /^\s*@[0-9A-Za-z_-]\+\%(\s.*\)\?$/
 
+" Template call: a `>name [args]` line the controller PASTES — it physically replaces this line
+" in the file with the named body, so the injected rows become ordinary visible items. A name char
+" must follow the `>`; the `>` is added to the duckiesWorktree exclusion below so `>name` isn't a
+" label (and `->` notes, matched by duckiesNote, keep their own scope).
+syntax match duckiesTemplate /^\s*>[0-9A-Za-z_-]\+\%(\s.*\)\?$/
+
 " Widget call: a `&name [args]` line — a status display, mirroring its output below as `| ` lines.
 " A single `&` runs once; `&&` reruns on the widget's interval. The `&name` line and the `| `
 " output lines directly beneath it form one block; the region ends at the first line that isn't a
@@ -36,7 +42,7 @@ syntax match duckiesNote /^\t\+ *->.*$/
 " Mirrors parse()'s fallback branch; the lookahead skips comment/macro/prompt/command/
 " show/marker/note rows so only true labels match. Styled like a header (Identifier); a
 " leading `!` ("show now") is matched by duckiesShowNow below.
-syntax match duckiesWorktree /\c^\t\+ *\%([#@&:$[|%?]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
+syntax match duckiesWorktree /\c^\t\+ *\%([#@&:$[|%?>]\|->\|!\s*$\|show\s*$\|prompt:\)\@!\S.*$/
 
 " DUCKIES directive: a `DUCKIES: <text>` line (any indent, incl. column 0) runs a background agent to
 " edit the .dk files themselves. Case-sensitive (no \c) so prose never trips it; defined after
@@ -107,6 +113,9 @@ highlight default duckiesShowNow guifg=#000000 guibg=#ffffff ctermfg=0 ctermbg=1
 highlight default duckiesClear guifg=#000000 guibg=#ffe600 ctermfg=0 ctermbg=226
 " Macro calls: black on LINE green (#06C755); `default` so a colorscheme can override.
 highlight default duckiesMacro guifg=#000000 guibg=#06c755 ctermfg=black ctermbg=41
+" Template calls: magenta (#e68fdd), no background — distinct from the green macro it resembles;
+" `default` so a colorscheme can override.
+highlight default duckiesTemplate guifg=#e68fdd ctermfg=213
 " Widget calls + their `| ` output: white on dark grey (#333333), matching the tui/Sublime block;
 " `default` so a colorscheme can override. Two groups share the color (the leading tabs, matched by
 " neither, keep no background).

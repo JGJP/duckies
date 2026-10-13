@@ -57,6 +57,10 @@
 					{
 						"scope": "markup.other.directive.duckies",
 						"settings": { "foreground": "#FFFFFF", "background": "#8B5CF6" }
+					},
+					{
+						"scope": "entity.name.function.template.duckies",
+						"settings": { "foreground": "#E68FDD" }
 					}
 				]
 			}

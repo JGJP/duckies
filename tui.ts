@@ -267,6 +267,7 @@ const C = {
 	cmdText: fg(51, 153, 255),
 	show: '\x1b[38;5;170m', // keyword-ish accent — no scheme rule to match
 	macro: fg(166, 223, 149), // #a6df95, no background (entity.name.function.macro)
+	template: fg(230, 143, 221), // #e68fdd, no background (entity.name.function.template) — a `<name>` paste call
 	directive: fgbg(255, 255, 255, 139, 92, 246), // white on #8b5cf6 (markup.other.directive) — a `DUCKIES:` line
 	widget: fgbg(255, 255, 255, 51, 51, 51), // white on #333333 — a `&name` display and its `| ` output
 	exec: fgbg(0, 0, 0, 255, 121, 26), // black on #ff791a (constant.language.executing)
@@ -365,6 +366,11 @@ function colorsFor(line: string, row: number): (string | null)[] {
 	if (/^@[\w-]+(?:\s.*)?$/.test(body)) {
 		// Macro call — a name char must follow the `@` (so a `@@@…` body line stays default).
 		fill(lead, n, C.macro)
+	} else if (/^>[\w-]+(?:\s.*)?$/.test(body)) {
+		// Template call — a `>name args` paste the controller replaces in-place with its body. A
+		// name char must follow the `>` (so a `->` note stays default). Its own magenta hue, distinct
+		// from the macro it resembles; matched before the worktree fallback so `>name` isn't a label.
+		fill(lead, n, C.template)
 	} else if (body.startsWith('DUCKIES:')) {
 		// A `DUCKIES:` directive — a background agent that edits the `.dk` files themselves.
 		// Case-sensitive (like parse), matched before the worktree fallback so it isn't read as a

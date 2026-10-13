@@ -60,6 +60,13 @@ Under a session header (a column-0 line naming a repo/dir), add indented lines:
 - **Slash commands / macros** — a prompt can be a slash command (`: /ship`). A `@name` line is
   a **macro** that expands to a saved sequence of steps (see `~/.config/duckies/macros.yaml` for the
   defined ones, e.g. `@sm`, `@gcom`).
+- **Templates** — a `>name args` line (any indent) is a **template** call: the supervisor
+  physically **replaces that line in the file** with the named body (see
+  `~/.config/duckies/templates.yaml`), arg-filled (`{0}`/`{1}`/`{*}`) and re-indented under the call
+  site. Unlike a macro (which expands in memory and runs silently under one `@name` line), a
+  template leaves **real, visible rows** behind — ordinary prompts/commands/worktrees that then
+  drain bottom-to-top like anything typed by hand. Use it to paste a reusable block at top level,
+  under a label, or under a worktree, e.g. `>handle-pr 2011`.
 
 ## Parallel lanes
 

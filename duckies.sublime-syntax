@@ -55,6 +55,14 @@ contexts:
       captures:
         1: entity.name.function.macro.duckies
 
+    # Template call: a `>name [args]` line the controller PASTES — it physically replaces this
+    # line in the file with the named body (see duckies-templates.yaml), so the injected rows become
+    # ordinary visible items. A name char must follow the `>` (so a `->` note never matches); matched
+    # before the worktree fallback so `>name` isn't read as a label. Magenta (its own function scope).
+    - match: '^[ \t]*(>[\w-]+(?:[ \t].*)?)$'
+      captures:
+        1: entity.name.function.template.duckies
+
     # DUCKIES directive: a `DUCKIES: <text>` line runs a background agent to edit the `.dk` files
     # themselves (see the duckies pass in duckies.ts). Case-sensitive `DUCKIES:` so ordinary prose never
     # trips it. Matched before the worktree fallback so it isn't read as a label; a distinct color

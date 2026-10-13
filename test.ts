@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './duckies'
+import { aliasWorktree, applyOps, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './duckies'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 import { appendLabel, colorizeLog } from './duckies-menu'
 
@@ -734,6 +734,61 @@ check(
 	dqArgs.sessions[0].prompts[0].steps?.[0].text === 'a b|c',
 	JSON.stringify(dqArgs.sessions[0].prompts[0].steps),
 )
+
+// expandTemplates: a `>name args` line is PASTED — replaced in the raw text by the template
+// body, arg-filled and re-indented so the call's own leading tabs prefix every body line (the
+// body's own tabs nest further). Unlike a macro the result is ordinary .dk rows, so it still
+// drains bottom-to-top; nothing here is reversed. Args fill {0}/{*} exactly like a macro.
+const tmpl = { 'handle-pr': ': /handle-pr-comments {0}\n$ gh pr checkout {0}\n' }
+const expanded = expandTemplates('app\n\t>handle-pr 2011\n', tmpl)
+check(
+	'a >template is pasted in place, arg-filled, indented under the call site',
+	expanded === 'app\n\t: /handle-pr-comments 2011\n\t$ gh pr checkout 2011\n',
+	JSON.stringify(expanded),
+)
+
+// The body's own nesting stacks under the call site's indent: a template called at top level can
+// inject a label with indented work, and the injected rows parse as a real queue. The body is
+// re-indented to the `.dk` tab convention, so a SPACE-indented YAML body (the natural way to author
+// it) still comes out tab-nested — not left with the authoring spaces.
+const wtTmpl = { feature: 'pr-{0}\n  : fix {0}\n  $ git fetch\n' } // body indented with 2 spaces
+const wtExpanded = expandTemplates('>feature 1234\n', wtTmpl)
+check(
+	'a space-indented body is re-indented to tabs under the call site',
+	wtExpanded === 'pr-1234\n\t: fix 1234\n\t$ git fetch\n',
+	JSON.stringify(wtExpanded),
+)
+// A tab-indented body is honored too (one tab per level), and a call that is itself indented
+// prefixes its own indent so the block nests one level deeper than the call site.
+const tabBody = { feature: 'pr-{0}\n\t: fix {0}\n' }
+check(
+	'a tab-indented body nests one tab per level, under the call indent',
+	expandTemplates('myrepo\n\t>feature 1234\n', tabBody) === 'myrepo\n\tpr-1234\n\t\t: fix 1234\n',
+	JSON.stringify(expandTemplates('myrepo\n\t>feature 1234\n', tabBody)),
+)
+// Deeper space nesting (4 spaces = two levels when the unit is 2) maps to two tabs.
+check(
+	'space depth maps to tabs by the detected unit',
+	expandTemplates('>deep\n', { deep: 'a\n  b\n    c\n' }) === 'a\n\tb\n\t\tc\n',
+	JSON.stringify(expandTemplates('>deep\n', { deep: 'a\n  b\n    c\n' })),
+)
+const wtParsed = parse(wtExpanded)
+check(
+	'the injected block parses as an ordinary session with two queued items',
+	wtParsed.sessions.length === 1 && wtParsed.sessions[0].label === 'pr-1234' && wtParsed.sessions[0].prompts.length === 2,
+	JSON.stringify(wtParsed.sessions.map((s) => [s.label, s.prompts.length])),
+)
+
+// An unknown name is left untouched (a typo stays a visible inert line); a `->` note is never a
+// call (the `>` must follow the indent directly, not a `-`); and a `>` inside a prompt body isn't one.
+check('an unknown >name is left untouched', expandTemplates('app\n\t>nope 1\n', tmpl) === 'app\n\t>nope 1\n')
+check('a -> note is not a template call', expandTemplates('app\n\t: done\n\t\t[DONE]\n\t\t-> handle-pr it', tmpl) === 'app\n\t: done\n\t\t[DONE]\n\t\t-> handle-pr it')
+check('a prompt that merely contains > is not a template call', expandTemplates('app\n\t: fix >handle-pr please\n', tmpl) === 'app\n\t: fix >handle-pr please\n')
+
+// Quoted args keep spaces; {*} joins all args; content with no call round-trips unchanged (so the
+// tick can cheaply detect "nothing to inject").
+check('{*} and a quoted arg fill correctly', expandTemplates('app\n\t>draft 1234 "the auth refactor"\n', { draft: ': ship {0} — {*}\n' }) === 'app\n\t: ship 1234 — 1234 the auth refactor\n')
+check('content with no call is returned unchanged', expandTemplates('app\n\t: plain\n', tmpl) === 'app\n\t: plain\n')
 
 // A `@macro` call is ONE queue item: the file keeps the `@name` line and carries a single
 // overall marker, while its steps run bottom-to-top in sequence (the body's LAST line first —
