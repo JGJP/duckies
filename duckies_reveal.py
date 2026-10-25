@@ -24,6 +24,72 @@ def _is_duckies(view):
     return (view.settings().get("syntax") or "").lower().endswith("duckies.sublime-syntax")
 
 
+_saved_caret = {}
+_reloading = set()
+
+
+class DuckiesPreserveCaret(sublime_plugin.EventListener):
+    """Keep the caret and scroll put when the supervisor rewrites a `.dk` file.
+
+    duckies saves via atomic rename (write a temp, rename it over the file), which swaps
+    the file's inode; Sublime sees that as an external change and reloads the clean
+    buffer, and the reload yanks the caret away (to the top, or some fixed line) rather
+    than leaving it where the user had it. Sublime exposes no pre-reload hook, so we can't
+    snapshot right before — instead we remember the caret on every real cursor move and
+    restore it after the reload, so an edit duckies makes doesn't move the user's cursor.
+
+    The reload both empties the buffer (a selection change to (0, 0)) and then repositions
+    the caret itself (more selection changes) — all of which would overwrite the position
+    we want to keep. So while a reload is in flight we stop tracking (the `_reloading`
+    gate) and restore from the last position the user actually set.
+
+    Position is kept by row/col (not raw offset): if the supervisor inserts/removes a
+    status line, the caret stays on the same screen row rather than sliding with the text.
+    """
+
+    def _track(self, view):
+        # size 0 is the buffer-clear Sublime does at the very start of a reload, before
+        # on_reload fires the `_reloading` gate — guard it explicitly so the clear's
+        # jump to (0, 0) can't overwrite the position we're about to put back.
+        if not _is_duckies(view) or view.id() in _reloading or view.size() == 0 or view.is_loading():
+            return
+        _saved_caret[view.id()] = (
+            [(view.rowcol(r.a), view.rowcol(r.b)) for r in view.sel()],
+            view.viewport_position(),
+        )
+
+    def _restore(self, view):
+        vid = view.id()
+        state = _saved_caret.get(vid)
+        if state is None or not _is_duckies(view):
+            return
+        regions, viewport = state
+        # Ignore the reload's own caret moves until it settles, then resume tracking.
+        _reloading.add(vid)
+
+        def apply():
+            sel = view.sel()
+            sel.clear()
+            for (row_a, col_a), (row_b, col_b) in regions:
+                sel.add(sublime.Region(view.text_point(row_a, col_a), view.text_point(row_b, col_b)))
+            view.set_viewport_position(viewport, False)
+
+        # Defer: the reload repositions the caret itself, so an inline restore gets
+        # overridden — running on the next tick (and once more after) lets ours win.
+        sublime.set_timeout(apply, 0)
+        sublime.set_timeout(apply, 30)
+        sublime.set_timeout(lambda: _reloading.discard(vid), 100)
+
+    def on_close(self, view):
+        _saved_caret.pop(view.id(), None)
+        _reloading.discard(view.id())
+
+    on_selection_modified = _track
+    # External-change reloads fire on_reload; a user-invoked revert fires on_revert.
+    on_reload = _restore
+    on_revert = _restore
+
+
 class DuckiesRevealCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         view = self.view
