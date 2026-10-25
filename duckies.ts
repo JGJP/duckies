@@ -1869,6 +1869,10 @@ async function sendCmd(label: string, text: string, n = 1) {
 		log(`no shell pane ${n} for ${T(label)}, skipping command`)
 		return
 	}
+	// Clear any prior command's done-file *before* typing this one, so its stale mtime can't be
+	// read as this command's completion. Covers macro `$` steps too (a macro item is isCmd:false,
+	// so the post-tick guard that removes plain-command done-files never fired for them).
+	rmCmdDone(label, n)
 	// The command's exit status is written to its done-file by the per-shell hook
 	// in the shell window (see duckies-{fish,bash,zsh}.*), so we type it verbatim.
 	await typeInto(pane, text)
@@ -3033,10 +3037,6 @@ async function tick(rt: Rt) {
 					continue
 				}
 			}
-			// Capture what an in-flight command's completion would look like *before*
-			// planQueue mutates markers/timers, so we can clear its done-file afterwards.
-			const cmdSentAtBefore = lr.cmdSentAt
-			const hadActiveCmd = s.prompts.some((p) => p.pane === n && p.isCmd && p.desiredKind === 'EXECUTING')
 			const cmdDoneMtime = readCmdDone(label, n)
 			const cmdDoneExit = cmdDoneMtime !== null ? readCmdExit(label, n) : null
 			// Poll the claude pane's live state once (lanes with prompts only; `$`-only lanes
@@ -3082,7 +3082,6 @@ async function tick(rt: Rt) {
 			}
 			const needsAttention = JEV_ATTENTION && lr.attention === true && lr.attnAt === state?.mtimeMs
 			const dispatches = planQueue(laneView(s, n), lr, { now: Date.now(), state, cmdDoneMtime, cmdDoneExit, paneBusy, paneBackground, needsAttention })
-			if (hadActiveCmd && cmdDoneMtime !== null && cmdDoneMtime > cmdSentAtBefore) rmCmdDone(label, n)
 			for (const d of dispatches) {
 				// Record what we send so the capture pass can tell it from human input (our sends
 				// re-fire the same UserPromptSubmit/post-command hooks). Recorded as the action
