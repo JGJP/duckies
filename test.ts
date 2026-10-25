@@ -1,7 +1,11 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, backgroundWorktreeJob, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutputLines, type Widgets } from './duckies'
+import { aliasWorktree, applyOps, backgroundWorktreeJob, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutput, widgetOutputLines, type Widgets } from './duckies'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 import { appendLabel, colorizeLog } from './duckies-menu'
+import { clearLane, dismissKey, markLaneDone, readLanes, reloadLaneWidgets, sleepHeader, Store, toggleSleep } from './duckies-notify'
+import { mkdtempSync, readFileSync as readFile, writeFileSync as writeFile } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join as joinPath } from 'node:path'
 
 let failures = 0
 const check = (name: string, cond: boolean, detail?: string) => {
@@ -1524,9 +1528,19 @@ check(
 	const emptyOps = buildWidgetOps(have.sessions, have.lines, new Map([[have.sessions[0].widgets[0], '']]))
 	check('emptied output reverts to a bare &pr line', applyOps(have.lines, emptyOps).join('\n') === 'repo\n\t&pr\n')
 
-	// A widget makes its session non-vacatable even with no prompts (a live display isn't reaped).
+	// widgetOutput reads displayed output back out of the file lines (inverse of the rendering): an
+	// inline suffix is the text after `: `, a `| ` block is each line de-prefixed, none → [].
+	const inl = parse('repo\n\t&pr: #42 open\n', {}, {}, widgets)
+	check('widgetOutput reads an inline suffix', JSON.stringify(widgetOutput(inl.sessions[0].widgets[0], inl.lines)) === JSON.stringify(['#42 open']))
+	const blk = parse('repo\n\t&pr\n\t\t| a\n\t\t| b\n', {}, {}, widgets)
+	check('widgetOutput reads a | block de-prefixed', JSON.stringify(widgetOutput(blk.sessions[0].widgets[0], blk.lines)) === JSON.stringify(['a', 'b']))
+	const none = parse('repo\n\t&pr\n', {}, {}, widgets)
+	check('widgetOutput on a widget with no output is empty', widgetOutput(none.sessions[0].widgets[0], none.lines).length === 0)
+
+	// A widget doesn't keep an otherwise-empty label alive (like a comment, it's inert content): a
+	// live widget-only session IS vacated.
 	const vac = parse('repo\n\t&pr\n', {}, {}, widgets)
-	check('a widget-only session is not vacated', vacatedSessions(vac.sessions, new Set(['repo'])).all.size === 0)
+	check('a widget-only session is vacated', vacatedSessions(vac.sessions, new Set(['repo'])).all.size === 1)
 
 	// A bare live session (a just-added `!label`) is vacated once empty — unless a tmux client is
 	// attached to it, in which case it's spared so it isn't reaped out from under you.
@@ -1725,6 +1739,125 @@ check(
 	})
 	await backgroundWorktreeJob('/base4', '/base4-worktrees/next', async () => void after.push('next'))
 	check('a failed removal does not wedge the base queue', after.length === 1, JSON.stringify(after))
+}
+
+// ---- notifier data layer (the default dashboard's model) ---------------------------------------
+// readLanes turns the parsed `.dk` sessions into one lane per frontier marker, carrying everything
+// the view and its actions need (status/text, file+line+indent, marker line, sleep header). It's
+// the same parse the tick drives, so the notifier view can't drift from the supervisor.
+{
+	const tmp = mkdtempSync(joinPath(tmpdir(), 'duckies-notify-'))
+	const lanesOf = (file: string) => readLanes([{ file, sessions: parse(readFile(file, 'utf8')).sessions }], tmp)
+
+	const f1 = joinPath(tmp, 'a.dk')
+	writeFile(f1, 'app\n\t: fix the bug\n\t\t[NEEDS ATTENTION]\n')
+	const L = lanesOf(f1)[0]
+	check('readLanes: one lane per frontier marker, with status/text', L && L.label === 'app' && L.pane === 1 && L.status === 'ATTENTION' && L.text === 'fix the bug', JSON.stringify(L))
+	check('readLanes: file/line/indent/markerLine/header point at the right rows', L.file === f1 && L.line === 2 && L.indent === '\t' && L.markerLine === 3 && L.headerLine === 1 && L.headerIndent === '' && L.asleep === false, JSON.stringify(L))
+
+	// A stale [EXECUTING] whose latest hook event shows the turn already ended is surfaced as DONE,
+	// so a finished turn doesn't linger as executing (e.g. the supervisor wasn't running to advance it).
+	const f2 = joinPath(tmp, 'b.dk')
+	writeFile(f2, 'solo\n\t: do it\n\t\t[EXECUTING]\n')
+	writeFile(joinPath(tmp, 'solo.json'), JSON.stringify({ event: 'Stop' }))
+	check('readLanes: a stale EXECUTING with a Stop hook reads as DONE', lanesOf(f2)[0].status === 'DONE', JSON.stringify(lanesOf(f2)[0]))
+
+	// turnEnded reads the *claude* hook, so it must NOT downgrade a frontier that's a `$` command (or a
+	// macro mid-`$`-step) still running in the shell pane — an idle claude pane says nothing about it.
+	writeFile(joinPath(tmp, 'shell.json'), JSON.stringify({ event: 'Notification', raw: { notification_type: 'idle_prompt' } }))
+	const f2b = joinPath(tmp, 'shell.dk')
+	writeFile(f2b, 'shell\n\t$ gh-wait-for-ci\n\t\t[EXECUTING]\n')
+	check('readLanes: a shell-command frontier stays EXECUTING despite an idle claude hook', lanesOf(f2b)[0].status === 'EXECUTING', JSON.stringify(lanesOf(f2b)[0]))
+	writeFile(joinPath(tmp, 'wait.json'), JSON.stringify({ event: 'Stop' }))
+	const f2c = joinPath(tmp, 'wait.dk')
+	writeFile(f2c, 'wait\n\t@wait\n\t\t[EXECUTING]\n')
+	const lanesMacro = (f: string) => readLanes([{ file: f, sessions: parse(readFile(f, 'utf8'), {}, { wait: '$ gh-wait-for-ci\n$ gh-wait-for-human' }).sessions }], tmp)
+	check('readLanes: a macro with a `$` step stays EXECUTING despite an idle claude hook', lanesMacro(f2c)[0].status === 'EXECUTING', JSON.stringify(lanesMacro(f2c)[0]))
+
+	// Deduped by id (label#pane): the first file carrying the marker wins.
+	const dup = readLanes(
+		[
+			{ file: '/x.dk', sessions: parse('app\n\t: first\n\t\t[DONE]\n').sessions },
+			{ file: '/y.dk', sessions: parse('app\n\t: second\n\t\t[DONE]\n').sessions },
+		],
+		tmp,
+	).filter((l) => l.label === 'app')
+	check('readLanes: a lane id appears once, first file wins', dup.length === 1 && dup[0].text === 'first', JSON.stringify(dup))
+
+	// A lane carries its session's `&name` widgets + their live output, so the view can echo them.
+	const fw = joinPath(tmp, 'widget.dk')
+	writeFile(fw, 'app\n\t&&pr: 3 open\n\t: fix the bug\n\t\t[NEEDS ATTENTION]\n')
+	const lanesW = (f: string) => readLanes([{ file: f, sessions: parse(readFile(f, 'utf8'), {}, {}, { pr: { interval: 10000, commands: ['x'] } }).sessions }], tmp)
+	const WL = lanesW(fw)[0]
+	check('readLanes: a lane carries its session widgets + output', WL.widgets.length === 1 && WL.widgets[0].call === '&&pr' && WL.widgets[0].line === 2 && WL.widgets[0].pending === false && JSON.stringify(WL.widgets[0].output) === JSON.stringify(['3 open']), JSON.stringify(WL.widgets))
+
+	// reloadLaneWidgets prepends a `!` refresh-now to each of the lane's widget lines (duckies reruns
+	// them next tick), leaving indentation and the rest of the file intact; a re-run is idempotent.
+	reloadLaneWidgets(WL)
+	check('reloadLaneWidgets: prepends `!` to the widget line', readFile(fw, 'utf8') === 'app\n\t!&&pr: 3 open\n\t: fix the bug\n\t\t[NEEDS ATTENTION]\n', JSON.stringify(readFile(fw, 'utf8')))
+	// The queued `!` re-parses as a pending (bang) widget — the view's loading state until the rerun lands.
+	check('readLanes: a queued `!` surfaces as a pending widget', lanesW(fw)[0].widgets[0].pending === true, JSON.stringify(lanesW(fw)[0].widgets[0]))
+	reloadLaneWidgets(lanesW(fw)[0])
+	check('reloadLaneWidgets: an already-banged widget is left as-is', readFile(fw, 'utf8') === 'app\n\t!&&pr: 3 open\n\t: fix the bug\n\t\t[NEEDS ATTENTION]\n', JSON.stringify(readFile(fw, 'utf8')))
+
+	// A plain session's sleep header is its own header line.
+	const sess = parse('app\n\t: x\n\t\t[DONE]\n').sessions
+	check('sleepHeader: a plain session targets its own header', JSON.stringify(sleepHeader(sess, 0)) === JSON.stringify({ line: 1, indent: '' }))
+
+	// clearLane inserts a `%` (per-pane sigil) just above the frontier item, at its indent — duckies
+	// collapses the finished run from there.
+	const fc = joinPath(tmp, 'clear.dk')
+	writeFile(fc, 'app\n\t: fix\n\t\t[DONE]\n')
+	clearLane(lanesOf(fc)[0])
+	check('clearLane: inserts an indented `%` above the frontier', readFile(fc, 'utf8') === 'app\n\t%\n\t: fix\n\t\t[DONE]\n', JSON.stringify(readFile(fc, 'utf8')))
+
+	// markLaneDone flips a blocking marker to [DONE] (one indent below the item) so a clear can sweep it.
+	const fm = joinPath(tmp, 'mark.dk')
+	writeFile(fm, 'app\n\t: fix\n\t\t[NEEDS ATTENTION]\n')
+	markLaneDone(lanesOf(fm)[0])
+	check('markLaneDone: rewrites the marker line to [DONE]', readFile(fm, 'utf8') === 'app\n\t: fix\n\t\t[DONE]\n', JSON.stringify(readFile(fm, 'utf8')))
+
+	// toggleSleep prefixes `?` on the session header (after its indent), and strips it on the way back.
+	const fs = joinPath(tmp, 'sleep.dk')
+	writeFile(fs, 'app\n\t: fix\n\t\t[DONE]\n')
+	toggleSleep(lanesOf(fs)[0])
+	check('toggleSleep: prefixes `?` on the header to sleep', readFile(fs, 'utf8').startsWith('?app\n'), JSON.stringify(readFile(fs, 'utf8')))
+	toggleSleep(lanesOf(fs)[0])
+	check('toggleSleep: strips `?` on the header to wake', readFile(fs, 'utf8').startsWith('app\n'), JSON.stringify(readFile(fs, 'utf8')))
+}
+
+// ---- notifier store: dismissals + snoozes, keyed by lane id+status+text, persisted --------------
+{
+	const sf = joinPath(mkdtempSync(joinPath(tmpdir(), 'duckies-store-')), 'notify.json')
+	const t0 = Date.now()
+	const st = new Store(sf)
+	const k = 'app#1\tDONE\tsm .'
+
+	st.toggleDismiss(k)
+	check('store: toggleDismiss sets a dismissal', st.isDismissed(k))
+	st.toggleDismiss(k)
+	check('store: toggleDismiss clears it again', !st.isDismissed(k))
+
+	st.snooze(k, t0 + 1000, 1000)
+	check('store: a future snooze reads as snoozed now', st.isSnoozed(k, t0))
+	check('store: the snooze has lapsed past its wake time', !st.isSnoozed(k, t0 + 2000))
+	check('store: lastSnoozeMs records the chosen duration', st.lastSnoozeMs() === 1000)
+
+	// Persistence: a fresh Store over the same file reloads the live snooze.
+	check('store: snoozes persist across reloads', new Store(sf).isSnoozed(k, t0))
+
+	// A sleep-snooze is flagged so its session can be woken on expiry.
+	const k2 = 'blog#1\tATTENTION\tx'
+	st.snooze(k2, t0 + 1000, 1000, true)
+	check('store: a sleep-snooze is flagged for wake-on-expiry', st.isSleepSnoozed(k2))
+
+	// prune drops dismissals for lanes that are gone and snoozes that have woken; live ones stay.
+	st.dismiss('gone#1\tDONE\told')
+	st.prune(new Set([k, k2]), t0 + 2000)
+	check('store: prune drops a dismissal with no live lane', !st.isDismissed('gone#1\tDONE\told'))
+	check('store: prune drops a woken snooze', !st.isSnoozed(k, t0 + 2000) && st.snoozeUntil(k) === undefined)
+
+	check('dismissKey is id + status + text, tab-joined', dismissKey({ id: 'app#1', status: 'DONE', text: 'sm .' } as never) === 'app#1\tDONE\tsm .')
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)

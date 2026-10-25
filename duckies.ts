@@ -347,7 +347,7 @@ export function macroSteps(body: string, args: string[]): MacroStep[] {
 
 // ---------------------------------------------------------------- parse model
 
-type Kind = 'EXECUTING' | 'DONE' | 'ATTENTION' | 'ERROR' | 'WAITING'
+export type Kind = 'EXECUTING' | 'DONE' | 'ATTENTION' | 'ERROR' | 'WAITING'
 const MARKER: Record<Kind, string> = {
 	EXECUTING: '[EXECUTING]',
 	DONE: '[DONE]',
@@ -428,7 +428,7 @@ interface Prompt {
 	strippedLine?: string
 	strippedLineIdx?: number
 }
-interface Session {
+export interface Session {
 	label: string
 	dir: string
 	// Set when this session is a git worktree of another repo (an indented, non-sigil line
@@ -1107,6 +1107,23 @@ export function widgetOutputLines(item: WidgetItem, output: string): string[] {
 	return output.split('\n').map((l) => (l === '' ? `${item.indent}\t|` : `${item.indent}\t| ${l}`))
 }
 
+// Read a widget's currently-displayed output back out of the file lines — the inverse of the
+// rendering above. Inline output (`&name: …`) is the single line's text after the `: ` delimiter;
+// a `| ` block is each line with its `<indent>\t| ` prefix stripped. Returns [] when there's no
+// output yet. Used by the notifier view to echo a widget's live output under its lane.
+export function widgetOutput(item: WidgetItem, lines: string[]): string[] {
+	if (item.inline) {
+		const line = lines[item.lineIdx] ?? ''
+		const ci = line.indexOf(': ')
+		return ci >= 0 ? [line.slice(ci + 2)] : []
+	}
+	if (!item.hasOutput) return []
+	return lines.slice(item.outputStartIdx, item.outputEndIdx + 1).map((l) => {
+		const bar = l.indexOf('|')
+		return bar < 0 ? l : l.slice(bar + (l[bar + 1] === ' ' ? 2 : 1))
+	})
+}
+
 // Ops to bring each widget's rendered output in line with fresh output. `outputs` maps a widget
 // to its new raw output; a widget absent from the map (not due to rerun this tick) is left alone.
 // Single-line output renders inline on the widget line (`&name: …`); anything else renders as a
@@ -1173,12 +1190,13 @@ export function vacatedSessions(sessions: Session[], liveLabels: Set<string>, at
 	for (const s of [...ordered].reverse()) {
 		const kids = children.get(s)!
 		liveSub.set(s, liveLabels.has(s.label) || kids.some((k) => liveSub.get(k)!))
-		// A widget or an unfinished `DUCKIES:` directive makes a session "occupied" the same way a
-		// prompt does — a live display or a still-running directive must not be reaped from under its
-		// line. A directive that already has its `-> ` note is done, so it no longer holds the session.
+		// An unfinished `DUCKIES:` directive makes a session "occupied" the same way a prompt does — a
+		// still-running directive must not be reaped from under its line. A directive that already has
+		// its `-> ` note is done, so it no longer holds the session. Widgets don't count: like a `#`
+		// comment, a `&name` display is inert content that never keeps an otherwise-empty label alive.
 		// A session a tmux client is currently viewing is never reaped out from under you — so a just
 		// -created empty session persists while you're in it (it's cleaned up once you switch away).
-		if (s.prompts.length === 0 && s.widgets.length === 0 && s.duckies.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)! && !attached.has(s.label)) removed.add(s)
+		if (s.prompts.length === 0 && s.duckies.every((h) => h.note) && kids.every((k) => removed.has(k)) && liveSub.get(s)! && !attached.has(s.label)) removed.add(s)
 	}
 	const tops = ordered.filter((s) => removed.has(s) && !(parent.get(s) && removed.has(parent.get(s)!)))
 	return { tops, all: removed }
@@ -3368,19 +3386,36 @@ if (isMain)
 			return
 		}
 		acquireLock()
-		// Interactive dashboard: colorized log + popup menu (press `m`). Only in a real TTY; skipped in
-		// dry-run (returns above) and disabled with DUCKIES_TUI=0, so piped/headless runs log plainly.
+		// Interactive dashboard: the full-screen notifier view with a log strip along the bottom (Tab
+		// expands it; m opens the config/new-label menu). Only in a real TTY; skipped in dry-run
+		// (returns above) and disabled with DUCKIES_TUI=0, so piped/headless runs log plainly.
 		if (process.stdin.isTTY && process.env.DUCKIES_TUI !== '0') {
 			dash = startDashboard({
+				colorEnabled: !process.env.NO_COLOR,
+				stateDir: STATE,
 				controlFiles,
 				configFiles: { aliases: ALIASES_FILE, macros: MACROS_FILE, widgets: WIDGETS_FILE, templates: TEMPLATES_FILE },
-				colorEnabled: !process.env.NO_COLOR,
-				locateLabel,
+				// Parse every control file the same way the tick does, so the view can't drift from it.
+				parseControlFiles: () => {
+					const aliases = loadAliases()
+					const macros = loadMacros()
+					const widgets = loadWidgets()
+					return controlFiles().map((f) => {
+						try {
+							return { file: f, sessions: parse(readFileSync(f, 'utf8'), aliases, macros, widgets).sessions }
+						} catch {
+							return { file: f, sessions: [] }
+						}
+					})
+				},
+				liveSessions: listTmux,
+				revealLane: (label, pane) => void showSession(label, { kind: 'claude', n: pane }),
 				revealSession: (label) => void showSession(label),
+				locateLabel,
 			})
 			process.on('exit', () => dash?.teardown())
 		}
-		log(`duckies watching ${SINGLE_FILE ?? `${CONTROL_DIR}/*${CONTROL_EXT}`} (${found.length} file(s))${dash ? ' · press m for menu' : ''}`)
+		log(`duckies watching ${SINGLE_FILE ?? `${CONTROL_DIR}/*${CONTROL_EXT}`} (${found.length} file(s))`)
 		// Between ticks, sleep TICK_MS — but a `.dk` edit wakes us early (after a short
 		// WATCH_MS debounce that folds an editor's write+rename into one tick), so a saved `!`
 		// reveal reaches wezterm in tens of ms rather than up to a second. The poll remains the
@@ -3410,6 +3445,7 @@ if (isMain)
 				process.exit(RESTART_EXIT)
 			}
 			await tick(rt)
+			dash?.refresh() // repull lane state into the notifier view now the tick's writes have landed
 			await new Promise<void>((resolve) => {
 				if (dirtyBetweenTicks) {
 					dirtyBetweenTicks = false

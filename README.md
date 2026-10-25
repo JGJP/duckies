@@ -53,20 +53,39 @@ pnpm duckies           # edit .dk in the built-in live editor (see below)
 pnpm duckies work.dk  # …or edit a specific control file
 ```
 
-### Supervisor menu
+### Supervisor view
 
-When `pnpm start` runs in a real terminal, its log is colorized by action/severity and a popup menu is
-available — press **`m`**. From the menu (arrow keys + enter, or the shortcut letter):
+When `pnpm start` runs in a real terminal, the supervisor shows a full-screen **notifier**: every lane
+is grouped by state and the supervisor's own log runs as a short strip along the bottom. The supervisor
+keeps reconciling the whole time — only the display changes. Sections, top to bottom:
 
-- **`a`/`c`/`w`/`t`** — open `aliases.yaml` / `macros.yaml` / `widgets.yaml` / `templates.yaml` in Sublime Text.
-- **`n`** — add a new label: pick one of your `.dk` files, type the label, and it's appended as a new
-  session header prefixed with `!`. The supervisor spawns the tmux session on its next tick and switches
-  your client to its claude window (then consumes the `!`) — no editor; you land straight in the session.
-  (If the label already exists, it reveals that session's tmux and opens its `.dk` in Sublime instead.)
+1. **NEEDS ATTENTION** — lanes stuck at `[NEEDS ATTENTION]` (and `[ERROR]`).
+2. **DONE** — lanes whose frontier is `[DONE]`, oldest first.
+3. **EXECUTING** — lanes currently running (and `[WAITING]`), dimmed with a spinner.
+4. **DISMISSED** / **SNOOZED** / **SLEEPING** — lanes you've set aside (appear only when non-empty). A
+   closed session shows `· closed`; a slept one `· asleep`.
 
-Editing opens in the Sublime GUI (`subl`), so it never takes over the terminal — the supervisor keeps
-reconciling and the log keeps scrolling. `Esc` closes the menu; `Ctrl-C` stops the supervisor (restoring
-the terminal). The menu/coloring auto-disable when stdout isn't a TTY (dry-run, piped) or `DUCKIES_TUI=0`.
+Keys (the selected row has a `❯` gutter):
+
+- **`j`/`k`** (or `↓`/`↑`) move · **`g`/`G`** jump to first/last.
+- **`space`/`enter`** focus the selected lane's tmux pane (switches the watching client to it).
+- **`h`** open the lane's spot in its `.dk` file in the editor (Sublime by default; override with
+  `DUCKIES_EDITOR`, e.g. `DUCKIES_EDITOR="code --goto"`).
+- **`s`** snooze (pick a duration; hidden until it lapses, then reappears) · **`S`** sleep & snooze
+  (also sleeps the session for that time, waking it on expiry) · **`z`** toggle sleep (`?`) on the
+  session · **`d`** dismiss / restore · **`u`** undo the last dismissal · **`x`** clear (writes a `%`
+  so duckies collapses the finished run) · **`/`** filter by lane name + text.
+- **`Tab`** expand the log strip to fullscreen (and back).
+- **`m`** open the config/new-label menu (arrow keys + enter, or the shortcut letter):
+  - **`a`/`c`/`w`/`t`** — open `aliases.yaml` / `macros.yaml` / `widgets.yaml` / `templates.yaml` in the editor.
+  - **`n`** — add a new label: pick one of your `.dk` files, type the label, and it's appended as a new
+    session header prefixed with `!`. The supervisor spawns the tmux session on its next tick and switches
+    your client to its claude window (then consumes the `!`) — you land straight in the session. (If the
+    label already exists, it reveals that session's tmux and opens its `.dk` at the header instead.)
+- **`q`** (or `Esc` / `Ctrl-C`) stop the supervisor (restoring the terminal).
+
+Editing opens in a GUI editor (`subl`), so it never takes over the terminal. The view auto-disables when
+stdout isn't a TTY (dry-run, piped) or `DUCKIES_TUI=0`, falling back to a plain scrolling log.
 
 ## Quickstart
 
@@ -863,8 +882,11 @@ Notes:
   `show`/`!` (e.g. `WezTerm`, `iTerm`, `Terminal`). Unset ⇒ no app foregrounding (the tmux
   client still switches). Ignored off macOS.
 - `DUCKIES_READY_MS` — boot grace before the first prompt is sent (default 6000).
-- `DUCKIES_TUI` — set to `0` to disable the interactive supervisor menu + log coloring (plain log only).
-  Also auto-disabled when stdout isn't a TTY.
+- `DUCKIES_TUI` — set to `0` to disable the interactive supervisor view (notifier + log strip) and fall
+  back to a plain scrolling log. Also auto-disabled when stdout isn't a TTY.
+- `DUCKIES_EDITOR` — the command the supervisor view opens `.dk`/config files with (`h`, and the `m`
+  menu's edit items); default `subl`. It receives the `<file>[:line]` target as its final argument, e.g.
+  `DUCKIES_EDITOR="code --goto"`.
 - `TYPESAFE_API_KEY` — enables the Jev attention check: when a Claude turn ends cleanly, its final
   message is judged by [TypeSafe](https://typesafe.ai)'s Jev model, and if it reads as *waiting on
   you* (a question, follow-ups pending a go-ahead, a blocked/needs-a-decision ending) the lane is
