@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { clearLane, dismissKey, markLaneDone, readLanes, reloadLaneWidgets, Store, toggleSleep, type Lane } from './duckies-notify'
+import { clearLane, dismissKey, markLaneDone, readLanes, reloadLaneWidgets, revealLaneHeader, Store, toggleSleep, type Lane } from './duckies-notify'
 import type { Session } from './duckies'
 
 export interface DashboardOpts {
@@ -588,7 +588,15 @@ export function startDashboard(opts: DashboardOpts) {
 
 	function focusSelected(): void {
 		const l = flat[sel]
-		if (l) opts.revealLane(l.label, l.pane)
+		if (!l) return
+		// A live session we can switch to directly. One whose tmux was reaped (a fully-[DONE] lane)
+		// has nothing to switch to, so bang its header instead: the supervisor spawns it (--resuming
+		// the kept conversation) and reveals it on the next tick.
+		if (isLive(l)) opts.revealLane(l.label, l.pane)
+		else {
+			revealLaneHeader(l)
+			emit(`focus: ${laneName(l)} has no live session — spawning + revealing it`)
+		}
 	}
 
 	function dismissSelected(): void {

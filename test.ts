@@ -2,7 +2,7 @@
 import { aliasWorktree, applyOps, backgroundWorktreeJob, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, staleResumeLabels, stripAnsi, vacatedSessions, vacateOps, widgetOutput, widgetOutputLines, type Widgets } from './duckies'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 import { appendLabel, colorizeLog } from './duckies-menu'
-import { clearLane, dismissKey, markLaneDone, readLanes, reloadLaneWidgets, sleepHeader, Store, toggleSleep } from './duckies-notify'
+import { clearLane, dismissKey, markLaneDone, readLanes, reloadLaneWidgets, revealLaneHeader, sleepHeader, Store, toggleSleep } from './duckies-notify'
 import { mkdtempSync, readFileSync as readFile, writeFileSync as writeFile } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join as joinPath } from 'node:path'
@@ -1838,6 +1838,15 @@ check(
 	check('toggleSleep: prefixes `?` on the header to sleep', readFile(fs, 'utf8').startsWith('?app\n'), JSON.stringify(readFile(fs, 'utf8')))
 	toggleSleep(lanesOf(fs)[0])
 	check('toggleSleep: strips `?` on the header to wake', readFile(fs, 'utf8').startsWith('app\n'), JSON.stringify(readFile(fs, 'utf8')))
+
+	// revealLaneHeader bangs the session header (after its indent) so the supervisor spawns+reveals a
+	// reaped lane on its next tick; an already-banged header is left as-is.
+	const fr = joinPath(tmp, 'reveal.dk')
+	writeFile(fr, 'app\n\t: fix\n\t\t[DONE]\n')
+	revealLaneHeader(lanesOf(fr)[0])
+	check('revealLaneHeader: prepends `!` to the header', readFile(fr, 'utf8') === '!app\n\t: fix\n\t\t[DONE]\n', JSON.stringify(readFile(fr, 'utf8')))
+	revealLaneHeader(lanesOf(fr)[0])
+	check('revealLaneHeader: an already-banged header is left as-is', readFile(fr, 'utf8') === '!app\n\t: fix\n\t\t[DONE]\n', JSON.stringify(readFile(fr, 'utf8')))
 }
 
 // ---- notifier store: dismissals + snoozes, keyed by lane id+status+text, persisted --------------

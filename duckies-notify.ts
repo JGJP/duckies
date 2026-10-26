@@ -247,6 +247,27 @@ export function toggleSleep(lane: Lane): void {
 	writeFileAtomic(lane.file, lines)
 }
 
+// Prepend duckies's `!` "show now" bang to the lane's session header (after its indent, so a
+// worktree label keeps its tabs). On its next tick the supervisor spawns the session if it isn't
+// live — `--resume`ing the kept conversation — switches the watching client to it, then strips the
+// `!`. Used to focus a lane whose tmux was reaped (e.g. a fully-[DONE] lane): a plain client-switch
+// can't reach a session that no longer exists, so we route through the spawn-and-reveal path
+// instead. Already-banged → left as-is. Atomic, so the directory watch sees one clean change.
+export function revealLaneHeader(lane: Lane): void {
+	let lines: string[]
+	try {
+		lines = readFileSync(lane.file, 'utf8').split('\n')
+	} catch {
+		return
+	}
+	const at = lane.headerLine - 1
+	if (at < 0 || at >= lines.length) return
+	const rest = lines[at].slice(lane.headerIndent.length)
+	if (rest.startsWith('!')) return
+	lines[at] = `${lane.headerIndent}!${rest}`
+	writeFileAtomic(lane.file, lines)
+}
+
 // ---------------------------------------------------------------- dismiss/snooze store
 // A lane is keyed by its id + current status + frontier text, so a dismissal/snooze stays attached
 // while it shows that exact state but lapses the moment the lane moves on (a new completion, or it
