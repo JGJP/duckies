@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { aliasWorktree, applyOps, backgroundWorktreeJob, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, stripAnsi, vacatedSessions, vacateOps, widgetOutput, widgetOutputLines, type Widgets } from './duckies'
+import { aliasWorktree, applyOps, backgroundWorktreeJob, buildDuckiesOps, buildOps, buildWidgetOps, dropDuringAttention, expandTemplates, frontierWindow, hasPendingInput, isSyntheticPrompt, lanesToReap, macroSteps, mergeSessions, paneBackgroundRunning, parse, planCapture, planQueue, reapTargets, resumeFlag, slashEcho, staleResumeLabels, stripAnsi, vacatedSessions, vacateOps, widgetOutput, widgetOutputLines, type Widgets } from './duckies'
 import { compileSession, merge3, nearestIndex, planSessionWriteback, toLines, viewBlocks } from './tui'
 import { appendLabel, colorizeLog } from './duckies-menu'
 import { clearLane, dismissKey, markLaneDone, readLanes, reloadLaneWidgets, sleepHeader, Store, toggleSleep } from './duckies-notify'
@@ -964,6 +964,20 @@ check('a session still in the model (or reserved) is not reaped', !reaped.some((
 // A worktree whose rt entry is missing (e.g. never stamped) is still killed, just not
 // removed from disk — never throws on the absent entry.
 check('a reaped label with no rt entry yields a null worktree', reapTargets(['gone'], new Set<string>(), new Set<string>(), {}).every((r) => r.worktree === null))
+
+// Resume-state purge: a session gone from every control file AND not live in tmux is torn down for
+// good, so its stale resume state (conv ids + lane files) is dropped and a recreated lane starts a
+// fresh conversation. A session still in the model — including one asleep via `?` (its block, hence
+// its label, stays in modelLabels), one whose pane merely died but whose block remains, a live one,
+// or a reserved one — keeps its resume state, so only sleep→wake / restart / respawn --resumes.
+const staleRt = { gone: { conv: { 1: 'dead' } }, asleep: { conv: { 1: 'keep' }, parked: true }, live: { conv: { 1: 'keep' } }, running: { conv: { 1: 'keep' } }, __agent: {} }
+const stale = staleResumeLabels(new Set(['live']), new Set(['asleep', 'running']), new Set(['__agent']), staleRt)
+check('a torn-down label (gone from model, no live tmux) is stale → resume dropped', stale.includes('gone'))
+check('an asleep `?` session (its block kept in the model) is not stale → wake resumes', !stale.includes('asleep'))
+check('a model label whose pane died but block remains is not stale → respawn resumes', !stale.includes('running'))
+check('a live tmux label is not stale (reapTargets handles it instead)', !stale.includes('live'))
+check('a reserved label is never stale', !stale.includes('__agent'))
+check('only the torn-down label is stale', JSON.stringify(stale) === JSON.stringify(['gone']))
 
 // Vacating: a label drained to nothing is removed — its whole block deleted — but only when it
 // (or something in its subtree) is live, so freshly-typed / idle-empty headers are left alone.

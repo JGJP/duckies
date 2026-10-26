@@ -1544,6 +1544,19 @@ const rmAllDoneFiles = (label: string) => {
 		}
 	}
 }
+// Remove just a label's resume/lane state files (the per-lane `.json` that carries claude's
+// session_id, plus `.cmd`/`.in`/`.incmd`) WITHOUT touching any `.dk.<key>.*` DUCKIES-agent files —
+// so dropping a torn-down session's resume state can't disturb an in-flight directive that happens to
+// key off the same (control-file-basename) label.
+const rmResumeState = (label: string) => {
+	const l = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+	const re = new RegExp(`^${l}(?:\\.\\d+)?\\.(json|cmd|in|incmd)$`)
+	for (const f of readdirSync(STATE)) if (re.test(f)) {
+		try {
+			unlinkSync(join(STATE, f))
+		} catch {}
+	}
+}
 // A short, stable key for a DUCKIES directive: a hash of its text plus its occurrence within the
 // label, so line-number shifts don't change it and two identical directives don't collide. Keys the
 // agent window's `@duckies` tag, its Stop-hook state file, and its in-flight rt record.
@@ -2472,6 +2485,18 @@ export function reapTargets(live: Iterable<string>, modelLabels: Set<string>, re
 	return out
 }
 
+// Labels whose resume state is stale and must be dropped so a future lane of the same name starts a
+// FRESH conversation instead of `--resume`ing a dead one: present in the runtime but gone from every
+// control file AND with no live tmux. reapTargets only sweeps sessions still live in tmux, so a
+// session whose pane had already died (idle-timeout, crash, manual kill) before its block was removed
+// slips through and leaves its `conv` ids + state files behind forever — the thing that makes a
+// recreated lane wrongly resume. A *sleeping* (`?`) session keeps its block in the file, so it stays
+// in modelLabels and is never listed here: only sleep→wake resumes. Pure, so the teardown-vs-sleep
+// distinction is unit-testable apart from the state I/O.
+export function staleResumeLabels(live: Set<string>, modelLabels: Set<string>, reserved: Set<string>, rt: Record<string, unknown>): string[] {
+	return Object.keys(rt).filter((label) => !reserved.has(label) && !modelLabels.has(label) && !live.has(label))
+}
+
 // The window used by the last real task before a `show` (the nearest prompt/command
 // below it in file order, since the queue drains bottom-to-top). Defaults to the
 // claude pane when nothing ran before it.
@@ -3126,6 +3151,25 @@ async function tick(rt: Rt) {
 		}
 		rmAllDoneFiles(label)
 		delete rt[label]
+	}
+
+	// Drop the resume state of any session that's completely torn down — gone from every control file
+	// and with no live tmux — so a later lane of the same name starts a fresh conversation rather than
+	// --resuming a dead one. (reapTargets above only covers sessions still live in tmux; a pane that
+	// died on its own — idle-timeout, crash, manual kill — would otherwise leave its `conv` ids and
+	// state files lingering here forever.) A sleeping `?` session keeps its block in the file, so it
+	// stays in modelLabels and is never swept: only sleep→wake --resumes.
+	for (const label of staleResumeLabels(live, modelLabels, RESERVED, rt)) {
+		const e = rt[label]
+		if (e.duckies && Object.keys(e.duckies).length) {
+			// An in-flight DUCKIES directive keys off this (control-file-basename) label — leave its
+			// tracking and `.dk.*` agent files for the duckies pass to tear down; just drop the resume.
+			delete e.conv
+			rmResumeState(label)
+			continue
+		}
+		delete rt[label]
+		rmAllDoneFiles(label)
 	}
 
 	// A merged session's session-level markers were computed on the merged object; write
