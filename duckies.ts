@@ -1817,6 +1817,63 @@ async function claudeBusy(label: string, n: number): Promise<boolean | null> {
 	return (await readClaudePane(label, n))?.busy ?? null
 }
 
+// Kill the background shells Claude Code is running in a lane's claude pane — the `· N shells`
+// tasks that keep a turn-ended lane [WAITING] (a self-resuming loop, a backgrounded command).
+// Invoked when the user marks a [WAITING] lane [DONE] from the notifier: flipping the marker alone
+// reverts next tick, since the supervisor re-derives [WAITING] from the live footer while the shells
+// run. We kill by process, not by key, and only the shells *under the agent* — claude itself stays
+// up (the conversation keeps its window); Claude Code just drops each killed shell from its footer.
+//
+// The pane tree is `login-shell → [wrapper] → claude (node) → background shells`. We can't just kill
+// every shell below the pane: a `claude` fish/bash wrapper sits ABOVE the node process, and killing
+// it takes claude down too. So first find the agent — the shallowest non-shell descendant of the
+// pane (the node/binary claude; MCP servers are deeper) — then kill only the shell subtrees beneath
+// it. Each shell's whole subtree goes so a backgrounded dev server under it dies with it. Best-
+// effort, never throws; if no agent process is found we leave the pane alone rather than guess.
+async function stopLaneBackground(label: string, n = 1): Promise<void> {
+	const pane = await paneFor(label, 'claude', n)
+	if (!pane) return
+	const tm = $({ nothrow: true, quiet: true })
+	const panePid = Number((await tm`tmux display -p -t ${pane} ${'#{pane_pid}'}`).stdout.trim())
+	if (!panePid) return
+	const ps = await tm`ps -axo pid=,ppid=,comm=`
+	if (ps.exitCode !== 0) return
+	const kids = new Map<number, number[]>()
+	const comm = new Map<number, string>()
+	for (const line of ps.stdout.split('\n')) {
+		const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)
+		if (!m) continue
+		const pid = Number(m[1])
+		const ppid = Number(m[2])
+		kids.set(ppid, [...(kids.get(ppid) ?? []), pid])
+		comm.set(pid, m[3])
+	}
+	const isShell = (pid: number) => /^-?(bash|zsh|sh|dash|fish)$/.test((comm.get(pid) ?? '').replace(/.*\//, ''))
+	// Breadth-first from the pane's login shell, so the first non-shell we hit is the agent (the
+	// claude node process), not one of the MCP servers it spawns deeper down.
+	const bfs = (root: number): number[] => {
+		const out: number[] = []
+		let frontier = [...(kids.get(root) ?? [])]
+		while (frontier.length) {
+			out.push(...frontier)
+			frontier = frontier.flatMap((p) => kids.get(p) ?? [])
+		}
+		return out
+	}
+	const under = bfs(panePid)
+	const agent = under.find((p) => !isShell(p))
+	if (!agent) return
+	const shells = bfs(agent).filter(isShell)
+	const victims = [...new Set(shells.flatMap((s) => [s, ...bfs(s)]))]
+	if (!victims.length) return
+	log(`stopping ${shells.length} background shell(s) in ${T(label)}${n > 1 ? `:${n}` : ''}`)
+	for (const p of victims) {
+		try {
+			process.kill(p, 'SIGTERM')
+		} catch {}
+	}
+}
+
 // The pane *only* if it still carries its @duckies tag. A tmux-resurrect restore brings a
 // session back with fresh panes that ran `exec fish` under the session env alone: they
 // lost the per-window DUCKIES_SHELL=1/DUCKIES_PANE that make the completion hook fire, and
@@ -3454,6 +3511,7 @@ if (isMain)
 				},
 				liveSessions: listTmux,
 				revealLane: (label, pane) => void showSession(label, { kind: 'claude', n: pane }),
+				stopLaneBackground: (label, pane) => stopLaneBackground(label, pane),
 				revealSession: (label) => void showSession(label),
 				locateLabel,
 			})

@@ -31,6 +31,10 @@ export interface DashboardOpts {
 	liveSessions: () => Promise<Set<string>>
 	// Focus a lane's claude pane — the supervisor's showSession for that pane.
 	revealLane: (label: string, pane: number) => void
+	// Kill the background shells Claude Code is running in a lane's claude pane — the `· N shells`
+	// tasks that keep a turn-ended lane [WAITING]. Without it, flipping a WAITING lane to [DONE]
+	// reverts next tick, since the supervisor re-derives [WAITING] from the still-present footer.
+	stopLaneBackground: (label: string, pane: number) => Promise<void>
 	// Switch the watching client to an existing session (for the m-menu duplicate-label reveal).
 	revealSession: (label: string) => void
 	// Locate an already-defined session for a typed label (resolved through aliases), so a "new
@@ -635,17 +639,23 @@ export function startDashboard(opts: DashboardOpts) {
 		refresh()
 	}
 
-	// Flip a [NEEDS ATTENTION] lane's frontier to [DONE] in place — resolve it without dismissing or
-	// clearing its run. Re-reads for the freshest file/line, since it edits the .dk file on disk.
-	function markDoneSelected(): void {
+	// Flip a [NEEDS ATTENTION]/[WAITING]/[EXECUTING] lane's frontier to [DONE] in place — resolve it
+	// without dismissing or clearing its run. Re-reads for the freshest file/line, since it edits the
+	// .dk file on disk. A [WAITING] lane is turn-ended-but-background-shells-running, and an
+	// [EXECUTING] lane can be stuck (e.g. a resumed session whose turn actually ended but whose marker
+	// never advanced): kill any background shells first, else the supervisor re-derives the live state
+	// next tick and the [DONE] flip reverts. (A genuinely-busy pane still re-derives [EXECUTING] — this
+	// only sticks for a lane that isn't actually running.)
+	async function markDoneSelected(): Promise<void> {
 		const id = flat[sel]?.id
 		if (!id) return
 		const l = readLanes(opts.parseControlFiles(), opts.stateDir).find((x) => x.id === id)
 		if (!l) return
-		if (l.status !== 'ATTENTION') {
-			emit(`mark done: ${laneName(l)} isn't [NEEDS ATTENTION] (${l.status})`)
+		if (l.status !== 'ATTENTION' && l.status !== 'WAITING' && l.status !== 'EXECUTING') {
+			emit(`mark done: ${laneName(l)} isn't [NEEDS ATTENTION]/[WAITING]/[EXECUTING] (${l.status})`)
 			return
 		}
+		if (l.status === 'WAITING' || l.status === 'EXECUTING') await opts.stopLaneBackground(l.label, l.pane)
 		markLaneDone(l)
 		emit(`mark done: ${laneName(l)}`)
 		refresh()
@@ -932,7 +942,7 @@ export function startDashboard(opts: DashboardOpts) {
 		if (k === 'd') return dismissSelected()
 		if (k === 'u') return undoDismiss()
 		if (k === 'x') return clearSelected()
-		if (k === 'D') return markDoneSelected()
+		if (k === 'D') return void markDoneSelected()
 		if (k === 'z') return sleepSelected()
 		if (k === 'h') return openSelected()
 		if (k === 'R') return reloadSelected()
