@@ -3,6 +3,8 @@
 Run many interactive Claude Code instances in tmux and control/observe them all
 through plain-text `.dk` files.
 
+![duckies demo](demo/showcase.gif)
+
 Each file is both a **dashboard** (Claude activity is written back as status
 markers) and a **control surface** (edits start/stop/clear sessions and queue
 prompts). A `tsx` supervisor loop merges every `*.dk` file in `~/.config/duckies/duckspaces`

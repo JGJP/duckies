@@ -1990,7 +1990,7 @@ async function runWidget(def: Widget, args: string[], dir: string): Promise<stri
 	for (const cmd of def.commands) {
 		const filled = fillArgs(cmd, args)
 		try {
-			const r = await $({ cwd, nothrow: true, quiet: true, timeout: '15s' })`fish -c ${filled}`
+			const r = await $({ cwd, nothrow: true, quiet: true, timeout: '120s' })`fish -c ${filled}`
 			const out = clean(r.stdout ?? '') || clean(r.stderr ?? '')
 			if (out !== '') parts.push(out)
 		} catch {
@@ -2323,8 +2323,9 @@ async function spawnDuckiesAgent(item: DuckiesItem, key: string) {
 	if (DRY) return
 	const tm = $({ nothrow: true, quiet: true })
 	const cwd = existsSync(AGENT_DIR) ? AGENT_DIR : CONTROL_DIR
-	// DUCKIES_PANE=`duckies.<key>` routes the agent's Stop hook to state/<label>.dk.<key>.json.
-	const env = ['-e', `DUCKIES_LABEL=${item.label}`, '-e', `DUCKIES_STATE=${STATE}`, '-e', `DUCKIES_PANE=duckies.${key}`]
+	// DUCKIES_PANE=`dk.<key>` routes the agent's Stop hook to state/<label>.dk.<key>.json, matching
+	// the path duckiesFile()/rmDuckiesFiles() read and clean.
+	const env = ['-e', `DUCKIES_LABEL=${item.label}`, '-e', `DUCKIES_STATE=${STATE}`, '-e', `DUCKIES_PANE=dk.${key}`]
 	const has = (await tm`tmux has-session -t ${T(AGENT_SESSION_LABEL)}`).exitCode === 0
 	const pane = has
 		? (await tm`tmux new-window -P -F ${'#{pane_id}'} -t ${T(AGENT_SESSION_LABEL)} -n ${item.label} -c ${cwd} ${env}`).stdout.trim()
@@ -2856,6 +2857,15 @@ interface Control {
 	mtime: number
 }
 
+// Widget runs are slow (a `ghprs --all` sweep can take ~90s) and must never stall the tick, so
+// they run off the critical path: `widgetRunning` guards against relaunching an in-flight widget,
+// `widgetOutputs` caches each widget's last output (keyed by `label\0name#occ`) so every tick can
+// render the latest result immediately, and a completed run calls `requestWake` to pull the fresh
+// output into the file on the next tick rather than the one that launched it.
+const widgetRunning = new Set<string>()
+const widgetOutputs = new Map<string, string>()
+let requestWake: (() => void) | null = null
+
 async function tick(rt: Rt) {
 	const live = await listTmux()
 	const aliases = loadAliases()
@@ -3337,18 +3347,25 @@ async function tick(rt: Rt) {
 		}
 	}
 
-	// ---- widget pass: rerun each due `&name` widget and mirror its output back into the file ----
+	// ---- widget pass: render each `&name` widget's latest output, relaunching due ones in bg ----
 	// A widget is a live display, not a queue item: a live (`&&`) widget reruns its commands every
-	// `interval` ms; a one-shot (`&`) widget runs once. Either way duckies rewrites the `| ` block
-	// below the `&name` line. Runs happen concurrently and are gated per widget by
-	// `rt[label].widgets[key].lastRun`; the resulting ops merge into the per-file rewrite
-	// below (so they respect the same mid-tick defer, and an unchanged display writes nothing).
+	// `interval` ms; a one-shot (`&`) widget runs once. Runs are slow and NEVER awaited here — a due
+	// widget is launched off the critical path (`runWidget().then(...)`) so the tick never stalls on
+	// it; its output lands in `widgetOutputs` and a `requestWake` pulls it into the file next tick.
+	// Each tick renders the cached output for every widget (seeded from the file on first sight so a
+	// restart keeps the current display), gated per widget by `rt[label].widgets[key].lastRun`; the
+	// resulting ops merge into the per-file rewrite below (respecting the mid-tick defer, and an
+	// unchanged display writes nothing).
 	const widgetOpsByPath = new Map<string, Op[]>()
 	if (!DRY) {
 		const now = Date.now()
 		const seen = new Map<string, Map<string, number>>() // label → (widget name → occurrence), for a stable run key
-		const due: { control: Control; item: WidgetItem; def: Widget; key: string; label: string; dir: string }[] = []
 		const outputsByPath = new Map<string, Map<WidgetItem, string>>()
+		const setOut = (path: string, item: WidgetItem, text: string) => {
+			const m = outputsByPath.get(path) ?? new Map<WidgetItem, string>()
+			m.set(item, text)
+			outputsByPath.set(path, m)
+		}
 		for (const c of controls) {
 			for (const s of c.sessions) {
 				for (const w of s.widgets) {
@@ -3356,9 +3373,7 @@ async function tick(rt: Rt) {
 						// A `!&name` refresh-now on a name that matches no widget: report it inline
 						// (`&name: no widget "name"`) — the rewrite also drops the `!`, consuming the
 						// request without doing anything else.
-						const m = outputsByPath.get(c.path) ?? new Map<WidgetItem, string>()
-						m.set(w, `no widget "${w.name}"`)
-						outputsByPath.set(c.path, m)
+						setOut(c.path, w, `no widget "${w.name}"`)
 						continue
 					}
 					const def = widgets[w.name]
@@ -3368,26 +3383,36 @@ async function tick(rt: Rt) {
 					const occ = perLabel.get(w.name) ?? 0
 					perLabel.set(w.name, occ + 1)
 					const key = `${w.name}#${occ}`
+					const stable = `${s.label}\0${key}`
+					// Render the latest known output. On first sight, seed the cache from whatever's already
+					// in the file so a fresh process (empty cache) keeps the current display until the first
+					// background run returns, and a leading `!` is still consumed by the clean-line rewrite.
+					if (!widgetOutputs.has(stable)) widgetOutputs.set(stable, widgetOutput(w, c.lines).join('\n'))
+					setOut(c.path, w, widgetOutputs.get(stable)!)
 					const lastRun = rt[s.label]?.widgets?.[key]?.lastRun ?? 0
-					// A leading `!` (`w.bang`) forces a single refresh now, whatever the gate says; the
-					// rewrite regenerates the line from the clean `call`, so the `!` is consumed. Absent a
-					// bang, a one-shot (`&`) runs a single time and never again; a live (`&&`) reruns once
-					// its interval has elapsed. Both gates survive restarts via `lastRun` in controller.json.
-					if (!w.bang && (w.once ? lastRun > 0 : now - lastRun < def.interval)) continue
-					due.push({ control: c, item: w, def, key, label: s.label, dir: s.dir })
+					// A leading `!` (`w.bang`) forces a refresh now, whatever the gate says. Absent a bang, a
+					// one-shot (`&`) runs a single time and never again; a live (`&&`) reruns once its interval
+					// has elapsed. Both gates survive restarts via `lastRun` in controller.json. `widgetRunning`
+					// keeps a still-running widget from being relaunched by a later tick.
+					const due = w.bang || (w.once ? lastRun === 0 : now - lastRun >= def.interval)
+					if (!due || widgetRunning.has(stable)) continue
+					widgetRunning.add(stable)
+					// Mark lastRun at launch (not completion) so the interval counts from the start and a run
+					// longer than the interval doesn't spin up a second copy every tick.
+					const entry = (rt[s.label] ??= { starting: true, startedAt: 0, lanes: {} })
+					;(entry.widgets ??= {})[key] = { lastRun: now }
+					const args = w.args
+					const dir = s.dir
+					void runWidget(def, args, dir)
+						.then((output) => void widgetOutputs.set(stable, output))
+						.catch(() => {})
+						.finally(() => {
+							widgetRunning.delete(stable)
+							requestWake?.()
+						})
 				}
 			}
 		}
-		await Promise.all(
-			due.map(async (d) => {
-				const output = await runWidget(d.def, d.item.args, d.dir)
-				const entry = (rt[d.label] ??= { starting: true, startedAt: 0, lanes: {} })
-				;(entry.widgets ??= {})[d.key] = { lastRun: now }
-				const m = outputsByPath.get(d.control.path) ?? new Map<WidgetItem, string>()
-				m.set(d.item, output)
-				outputsByPath.set(d.control.path, m)
-			}),
-		)
 		for (const c of controls) {
 			const m = outputsByPath.get(c.path)
 			if (m) widgetOpsByPath.set(c.path, buildWidgetOps(c.sessions, c.lines, m))
@@ -3525,6 +3550,12 @@ if (isMain)
 		let wake: (() => void) | null = null
 		let dirtyBetweenTicks = false
 		let debounce: ReturnType<typeof setTimeout> | null = null
+		// A background widget run that just finished pulls its fresh output into the file by waking the
+		// loop now (or flagging the in-flight tick to run again immediately), same path as a `.dk` edit.
+		requestWake = () => {
+			if (wake) wake()
+			else dirtyBetweenTicks = true
+		}
 		if (WATCH_MS > 0)
 			watchControls(() => {
 				if (debounce) return // already coalescing this burst
